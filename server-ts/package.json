@@ -1,0 +1,23 @@
+{
+  "name": "x402-cardano-demo-server-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@x402/cardano": "file:../../x402/typescript/packages/mechanisms/cardano",
+    "@x402/core": "file:../../x402/typescript/packages/core",
+    "@x402/hono": "file:../../x402/typescript/packages/http/hono",
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.10.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,90 @@
+# docker-compose for the x402 Cardano demo.
+#
+# Expected directory layout:
+#
+#   <parent>/
+#   ├── x402/                  ← Kammerlo/x402 fork (library source, must be built first)
+#   └── x402-cardano-demo/     ← this repo (run docker compose from here)
+#
+# Requires Docker Engine 23+ / Docker Desktop 4.19+ (BuildKit with additional_contexts).
+#
+# Prerequisites — run once from the x402/ directory:
+#   cd ../x402/typescript
+#   pnpm install
+#   pnpm --filter @x402/core build
+#   pnpm --filter @x402/extensions build
+#   pnpm --filter @x402/cardano build
+#   pnpm --filter @x402/hono build
+#
+# Quick start (run from x402-cardano-demo/):
+#   cp .env.example .env   # fill in BLOCKFROST_PROJECT_ID_PREPROD and DEMO_PAYTO_ADDRESS
+#   docker compose --env-file .env up --build
+
+services:
+  facilitator:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: facilitator/Dockerfile
+    environment:
+      BLOCKFROST_PROJECT_ID_PREPROD: ${BLOCKFROST_PROJECT_ID_PREPROD}
+      ACCEPT_MEMPOOL: "true"
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+    ports:
+      - "${FACILITATOR_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server-py:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: server-py/Dockerfile
+    environment:
+      DEMO_PAYTO_ADDRESS: ${DEMO_PAYTO_ADDRESS}
+      FACILITATOR_URL: ${FACILITATOR_URL:-http://facilitator:8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      X402_NETWORK: ${X402_NETWORK:-cardano:preprod}
+    ports:
+      - "${SERVER_PY_PORT:-8001}:8001"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+
+  server-ts:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: server-ts/Dockerfile
+    environment:
+      DEMO_PAYTO_ADDRESS: ${DEMO_PAYTO_ADDRESS}
+      FACILITATOR_URL: ${FACILITATOR_URL:-http://facilitator:8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      X402_NETWORK: ${X402_NETWORK:-cardano:preprod}
+      PORT: "8002"
+    ports:
+      - "${SERVER_TS_PORT:-8002}:8002"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: frontend/Dockerfile
+    environment:
+      VITE_TS_BACKEND: ${VITE_TS_BACKEND:-http://localhost:${SERVER_TS_PORT:-8002}}
+      VITE_PY_BACKEND: ${VITE_PY_BACKEND:-http://localhost:${SERVER_PY_PORT:-8001}}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      - server-py
+      - server-ts

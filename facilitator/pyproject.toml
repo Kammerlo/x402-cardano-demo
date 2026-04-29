@@ -1,0 +1,22 @@
+[project]
+name = "x402-cardano-demo-facilitator"
+version = "0.1.0"
+description = "Demo standalone x402 Cardano facilitator backed by Blockfrost preprod"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.0.0",
+    # The local x402 package lives at ../../python/x402; it is installed via
+    # `pip install -e ../../python/x402[cardano]` (see Dockerfile / README).
+    "x402",
+    "pycardano>=0.10.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["main.py", "blockfrost_signer.py"]
