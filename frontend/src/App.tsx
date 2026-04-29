@@ -12,6 +12,8 @@ import {
 const BACKENDS: Record<string, string> = {
   ts: import.meta.env.VITE_TS_BACKEND ?? "http://localhost:8002",
   py: import.meta.env.VITE_PY_BACKEND ?? "http://localhost:8001",
+  java: import.meta.env.VITE_JAVA_BACKEND ?? "http://localhost:8003",
+  go: import.meta.env.VITE_GO_BACKEND ?? "http://localhost:8004",
 };
 
 type StatusKind = "info" | "success" | "error";
@@ -357,7 +359,7 @@ function StatusBar({ status, explorerLink }: {
  */
 export default function App(): ReactElement {
   const { wallet, connected } = useWallet();
-  const [backend, setBackend] = useState<"ts" | "py">("ts");
+  const [backend, setBackend] = useState<"ts" | "py" | "java" | "go">("ts");
   const [signer, setSigner] = useState<CIP30CardanoSigner | null>(null);
   const [signerError, setSignerError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
@@ -396,7 +398,14 @@ export default function App(): ReactElement {
   }, [signer]);
 
   const backendUrl = BACKENDS[backend];
-  const backendLabel = backend === "ts" ? "TS server" : "Python server";
+  const backendLabel =
+    backend === "ts"
+      ? "TS server"
+      : backend === "py"
+      ? "Python server"
+      : backend === "java"
+      ? "Java server"
+      : "Go server";
 
   // Derive the diagram phase from current flow step states
   const diagramPhase: DiagramPhase = useMemo((): DiagramPhase => {
@@ -754,9 +763,9 @@ export default function App(): ReactElement {
           <div className="setup-card-num">01</div>
           <h3>Choose Backend</h3>
           <p>
-            Both servers implement the same x402 spec — one in TypeScript with
-            Hono, one in Python with FastAPI. Switch freely; the wallet flow is
-            identical.
+            Four servers, one spec — TypeScript with Hono, Python with FastAPI,
+            Java with Spring Boot, and Go with net/http. Switch freely; the
+            wallet flow is identical.
           </p>
           <div className="backend-toggle">
             <button
@@ -770,6 +779,18 @@ export default function App(): ReactElement {
               onClick={() => setBackend("py")}
             >
               Python · FastAPI
+            </button>
+            <button
+              className={`backend-opt${backend === "java" ? " active" : ""}`}
+              onClick={() => setBackend("java")}
+            >
+              Java · Spring Boot
+            </button>
+            <button
+              className={`backend-opt${backend === "go" ? " active" : ""}`}
+              onClick={() => setBackend("go")}
+            >
+              Go · net/http
             </button>
           </div>
         </div>

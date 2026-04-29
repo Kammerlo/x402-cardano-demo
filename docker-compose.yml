@@ -74,6 +74,42 @@ services:
       facilitator:
         condition: service_healthy
 
+  server-java:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: server-java/Dockerfile
+    environment:
+      DEMO_PAYTO_ADDRESS: ${DEMO_PAYTO_ADDRESS}
+      FACILITATOR_URL: ${FACILITATOR_URL:-http://facilitator:8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      X402_NETWORK: ${X402_NETWORK:-cardano:preprod}
+      PORT: "8003"
+    ports:
+      - "${SERVER_JAVA_PORT:-8003}:8003"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+
+  server-go:
+    build:
+      context: .
+      additional_contexts:
+        x402: ../x402
+      dockerfile: server-go/Dockerfile
+    environment:
+      DEMO_PAYTO_ADDRESS: ${DEMO_PAYTO_ADDRESS}
+      FACILITATOR_URL: ${FACILITATOR_URL:-http://facilitator:8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      X402_NETWORK: ${X402_NETWORK:-cardano:preprod}
+      PORT: "8004"
+    ports:
+      - "${SERVER_GO_PORT:-8004}:8004"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+
   frontend:
     build:
       context: .
@@ -83,8 +119,12 @@ services:
     environment:
       VITE_TS_BACKEND: ${VITE_TS_BACKEND:-http://localhost:${SERVER_TS_PORT:-8002}}
       VITE_PY_BACKEND: ${VITE_PY_BACKEND:-http://localhost:${SERVER_PY_PORT:-8001}}
+      VITE_JAVA_BACKEND: ${VITE_JAVA_BACKEND:-http://localhost:${SERVER_JAVA_PORT:-8003}}
+      VITE_GO_BACKEND: ${VITE_GO_BACKEND:-http://localhost:${SERVER_GO_PORT:-8004}}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     depends_on:
       - server-py
       - server-ts
+      - server-java
+      - server-go
