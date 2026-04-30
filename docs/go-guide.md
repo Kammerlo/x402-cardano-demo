@@ -148,8 +148,8 @@ type PaymentResponseHeader struct {
     Success     bool                   `json:"success"`
     Transaction string                 `json:"transaction,omitempty"`
     Network     string                 `json:"network,omitempty"`
-    Payer       string                 `json:"payer,omitempty"`
     Extensions  map[string]interface{} `json:"extensions,omitempty"`
+    ErrorReason string                 `json:"errorReason,omitempty"`
 }
 
 type NetworkConfig struct {
