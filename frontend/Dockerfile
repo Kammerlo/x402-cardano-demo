@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 # Build context  : x402-cardano-demo/ (this repo)
 # Named context  : x402  →  ../x402  (Kammerlo/x402 fork, library source)
@@ -6,7 +6,7 @@ FROM node:20-alpine
 
 WORKDIR /workspace
 
-RUN corepack enable && corepack prepare pnpm@10.7.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.1.1 --activate
 
 # Pull the workspace metadata + packages from the library repo.
 COPY --from=x402 typescript/package.json typescript/pnpm-workspace.yaml typescript/pnpm-lock.yaml typescript/tsconfig.base.json /workspace/x402/typescript/
