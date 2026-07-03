@@ -17,6 +17,11 @@ public final class CardanoNetworks {
         if (network == null) return null;
         return CIP34_ALIASES.getOrDefault(network, network);
     }
-    public static boolean isSupported(String network) { return SUPPORTED.contains(normalize(network)); }
+    public static boolean isSupported(String network) {
+        // Set.of(...).contains(null) throws by contract; guard so null is a clean
+        // false, consistent with networkId(null) returning 0.
+        String n = normalize(network);
+        return n != null && SUPPORTED.contains(n);
+    }
     public static int networkId(String network) { return MAINNET.equals(normalize(network)) ? 1 : 0; }
 }
