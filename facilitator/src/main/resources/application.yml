@@ -1,0 +1,35 @@
+server:
+  port: 4022
+
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/yaci-store;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  flyway:
+    locations: classpath:db/store/{vendor}
+    out-of-order: true
+
+apiPrefix: /yaci-api
+
+store:
+  cardano:
+    host: preprod-node.play.dev.cardano.org   # alt public relay: preprod-node.world.dev.cardano.org:30000
+    port: 3001
+    protocol-magic: 1
+
+x402:
+  network: cardano:preprod
+  blockfrost:
+    base-url: https://cardano-preprod.blockfrost.io/api/v0
+    project-id: ${BLOCKFROST_PROJECT_ID:}
+  settle:
+    confirmation-timeout: 180s
+    poll-interval: 3s
+    accept-mempool: false
+  duplicate-cache:
+    ttl: 120s
+  sync-from-tip:
+    enabled: true
+    blocks-behind: 30
