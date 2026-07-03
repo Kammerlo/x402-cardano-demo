@@ -1,4 +1,4 @@
-// ExactCardanoFacilitatorScheme.java (verify half; settle added in Task 8)
+// ExactCardanoFacilitatorScheme.java
 package org.x402cardano.facilitator.cardano;
 
 import com.bloxbean.cardano.client.api.model.ProtocolParams;
@@ -11,6 +11,7 @@ import org.x402cardano.facilitator.registry.SchemeNetworkFacilitator;
 import java.math.BigInteger;
 import java.time.Duration;
 import java.util.*;
+import java.util.Base64;
 import java.util.regex.Pattern;
 
 /**
@@ -182,7 +183,40 @@ public class ExactCardanoFacilitatorScheme implements SchemeNetworkFacilitator {
 
     @Override
     public SettleResponse settle(PaymentPayload payload, PaymentRequirements requirements) {
-        throw new UnsupportedOperationException("settle() implemented in Task 8");
+        VerifyResponse verify = verify(payload, requirements);
+        String network = payload.accepted() != null ? payload.accepted().network() : requirements.network();
+        if (!verify.isValid())
+            return SettleResponse.fail(
+                    verify.invalidReason() != null ? verify.invalidReason() : "verification_failed",
+                    verify.invalidMessage(), network);
+
+        String txB64 = (String) payload.payload().get("transaction");
+        // Atomic claim BEFORE submission so concurrent settles can't all pass the check.
+        if (!duplicateCache.tryClaim(txB64))
+            return SettleResponse.fail(ErrorCodes.DUPLICATE_SETTLEMENT, null, network);
+
+        try {
+            String txHash = chain.submitTransaction(Base64.getDecoder().decode(txB64));
+            boolean confirmed = chain.awaitInclusion(txHash, config.confirmationTimeout());
+            String status = confirmed ? "confirmed" : "mempool";
+            if (!confirmed && !config.acceptMempool())
+                // Claim KEPT: the tx may still land; retries must not rebroadcast.
+                return SettleResponse.failWithTx(ErrorCodes.SETTLEMENT_NOT_CONFIRMED,
+                        txHash, network, verify.payer(), status);
+            return SettleResponse.ok(txHash, network, verify.payer(), status);
+        } catch (RuntimeException e) {
+            duplicateCache.release(txB64); // legitimate retry may re-attempt
+            return SettleResponse.fail(ErrorCodes.SETTLEMENT_FAILED, describeErrorChain(e), network);
+        }
+    }
+
+    private static String describeErrorChain(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (sb.length() > 0) sb.append(" | ");
+            sb.append(c.getMessage() != null ? c.getMessage() : c.getClass().getSimpleName());
+        }
+        return sb.toString();
     }
 
     private static String str(Map<String, Object> map, String key) {
