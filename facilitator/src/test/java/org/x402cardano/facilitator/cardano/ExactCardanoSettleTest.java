@@ -96,4 +96,21 @@ class ExactCardanoSettleTest {
         assertThat(r.extra()).containsEntry("status", "mempool");
         assertThat(scheme.settle(payload, req).errorReason()).isEqualTo(ErrorCodes.DUPLICATE_SETTLEMENT);
     }
+
+    @Test void expiredClaimIsReclaimable() throws Exception {
+        // TS parity: once a claim's own TTL elapses it becomes reclaimable, so a
+        // legitimate retry after the duplicate window proceeds instead of being
+        // wrongly denied as duplicate_settlement.
+        ExactCardanoFacilitatorScheme shortTtl = new ExactCardanoFacilitatorScheme(
+                chain, new CardanoTransactionDecoder(),
+                new ExactCardanoFacilitatorScheme.SettleConfig(
+                        Duration.ofSeconds(2), false, Duration.ofMillis(50)));
+        assertThat(shortTtl.settle(payload, req).success()).isTrue();
+        assertThat(chain.submitCount).isEqualTo(1);
+        Thread.sleep(120); // outlive the 50ms duplicate-cache TTL
+        SettleResponse retry = shortTtl.settle(payload, req);
+        assertThat(retry.errorReason()).isNotEqualTo(ErrorCodes.DUPLICATE_SETTLEMENT);
+        assertThat(retry.success()).isTrue();
+        assertThat(chain.submitCount).isEqualTo(2); // expired key reclaimed -> resubmitted
+    }
 }
