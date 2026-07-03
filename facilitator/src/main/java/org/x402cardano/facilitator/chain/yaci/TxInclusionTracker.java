@@ -20,6 +20,7 @@ public class TxInclusionTracker {
 
     @EventListener
     public void onTransactions(TransactionEvent event) {
+        if (event.getTransactions() == null) return;
         long slot = event.getMetadata().getSlot();
         event.getTransactions().forEach(tx ->
                 includedAtSlot.put(tx.getTxHash().toLowerCase(), slot));

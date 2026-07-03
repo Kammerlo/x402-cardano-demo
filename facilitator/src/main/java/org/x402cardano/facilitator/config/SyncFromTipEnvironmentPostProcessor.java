@@ -32,8 +32,11 @@ public class SyncFromTipEnvironmentPostProcessor implements EnvironmentPostProce
             System.err.println("[sync-from-tip] BLOCKFROST_PROJECT_ID missing - yaci-store will sync from its default start point");
             return;
         }
-        int blocksBehind = Integer.parseInt(env.getProperty("x402.sync-from-tip.blocks-behind", "30"));
+        // Everything below must be failure-safe: a bad blocks-behind override, an
+        // unreachable Blockfrost, or unexpected JSON must log to stderr and return,
+        // never throw out of postProcessEnvironment (that would crash Spring startup).
         try {
+            int blocksBehind = parseBlocksBehind(env.getProperty("x402.sync-from-tip.blocks-behind", "30"));
             HttpClient http = HttpClient.newHttpClient();
             ObjectMapper json = new ObjectMapper();
             JsonNode latest = fetch(http, json, baseUrl + "/blocks/latest", projectId);
@@ -48,6 +51,17 @@ public class SyncFromTipEnvironmentPostProcessor implements EnvironmentPostProce
                     + " (block " + targetHeight + ", " + blocksBehind + " behind tip)");
         } catch (Exception e) {
             System.err.println("[sync-from-tip] failed to resolve tip via Blockfrost: " + e.getMessage());
+        }
+    }
+
+    /** Missing/blank/non-numeric blocks-behind falls back to the default rather than throwing. */
+    private int parseBlocksBehind(String raw) {
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException | NullPointerException e) {
+            System.err.println("[sync-from-tip] invalid x402.sync-from-tip.blocks-behind='" + raw
+                    + "' - falling back to 30");
+            return 30;
         }
     }
 
