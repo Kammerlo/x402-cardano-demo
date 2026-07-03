@@ -42,7 +42,8 @@ export function formatElapsed(seconds: number): string {
  */
 const ERROR_EXPLANATIONS: Record<string, string> = {
   network_mismatch: "The wallet is signing for a different network than the server requested.",
-  exact_cardano_facilitator_chain_lookup_failed_unsigned: "The transaction the wallet returned has no signature on it.",
+  exact_cardano_facilitator_chain_lookup_failed:
+    "The facilitator couldn't look up a referenced UTxO on-chain — a node or provider error, not a problem with the payment itself.",
   invalid_exact_cardano_payload_unsigned: "The transaction the wallet returned has no signature on it.",
   invalid_exact_cardano_payload_invalid_signature: "The signature on the transaction doesn't check out against the wallet's key.",
   invalid_exact_cardano_payload_ttl_expired: "The transaction's time-to-live slot has already passed — it took too long to reach the facilitator.",

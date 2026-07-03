@@ -14,8 +14,20 @@ interface SettlementWaitProps {
 export function SettlementWait({ startedAt }: SettlementWaitProps) {
   const elapsed = useElapsedSeconds(startedAt, true);
 
+  // The visual clock ticks every 250ms (see useElapsedSeconds) — fine to look
+  // at, unbearable to have re-announced by a screen reader. This separate
+  // hidden live region announces once at the start, then only when the
+  // 10-second bucket changes, so it stays sparse for the whole 20-60s wait.
+  const announcement =
+    elapsed < 10
+      ? "Waiting for on-chain confirmation…"
+      : `Still waiting, about ${Math.floor(elapsed / 10) * 10} seconds.`;
+
   return (
-    <div className="settlement-wait" role="status">
+    <div className="settlement-wait">
+      <p className="visually-hidden" aria-live="polite">
+        {announcement}
+      </p>
       <div className="settlement-wait__pulse" aria-hidden="true">
         <span />
         <span />
