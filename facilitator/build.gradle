@@ -13,7 +13,10 @@ repositories { mavenCentral() }
 
 ext {
     yaciStoreVersion = '2.0.0-beta1'
-    cardanoClientVersion = '0.6.4'
+    // yaci-store 2.0.0-beta1 transitively pulls cardano-client-* 0.7.0-beta2; pin the
+    // whole cardano-client stack to that so the classpath is coherent (a mixed
+    // 0.6.4/0.7.0-beta2 stack moves classes like NetworkId between packages).
+    cardanoClientVersion = '0.7.0-beta2'
 }
 
 dependencies {
