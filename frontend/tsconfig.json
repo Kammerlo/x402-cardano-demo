@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["vite/client", "node"],
+    // Vite (not tsc) bundles/emits the app; without this, `tsc -b` (used by
+    // the "build" script as a typecheck gate) writes stray compiled .js
+    // files next to the .tsx/.ts sources.
+    "noEmit": true
+  },
+  "include": ["src"]
+}
