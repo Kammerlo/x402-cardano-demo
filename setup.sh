@@ -6,6 +6,13 @@ X402_TS="$(cd "$(dirname "$0")/../x402/typescript" && pwd)"
 echo "Building x402 TypeScript workspace at $X402_TS"
 cd "$X402_TS"
 pnpm install
-pnpm build
+# Build only the packages this demo consumes (+ their deps), NOT the whole
+# workspace: the upstream `site` docs package has a pre-existing build failure
+# that is unrelated to the demo and would abort a full `pnpm build`.
+npx turbo run build \
+  --filter=@x402/core \
+  --filter=@x402/cardano \
+  --filter=@x402/express \
+  --filter=@x402/fetch
 echo "Done. Packages with dist/:"
 ls -d packages/core/dist packages/http/express/dist packages/http/fetch/dist packages/mechanisms/cardano/dist
