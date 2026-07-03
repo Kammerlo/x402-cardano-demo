@@ -5,8 +5,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.x402cardano.facilitator.cardano.CardanoTransactionDecoder;
 import org.x402cardano.facilitator.cardano.ExactCardanoFacilitatorScheme;
+import org.x402cardano.facilitator.chain.BlockfrostChainService;
+import org.x402cardano.facilitator.chain.CompositeChainService;
 import org.x402cardano.facilitator.chain.FacilitatorChainService;
-import org.x402cardano.facilitator.chain.UtxoInfo;
+import org.x402cardano.facilitator.chain.yaci.ChainTipTracker;
+import org.x402cardano.facilitator.chain.yaci.TxInclusionTracker;
 import org.x402cardano.facilitator.registry.X402FacilitatorRegistry;
 
 @Configuration
@@ -31,19 +34,12 @@ public class FacilitatorConfig {
                 .failOnUnknownProperties(false);
     }
 
-    // Interim bean so the context boots before Task 12; any use fails loudly.
-    // Task 12 wires the real FacilitatorChainService and deletes this bean.
+    // Division of chain authority: Blockfrost for full-UTxO-set queries, protocol
+    // params, and submission; embedded yaci-store trackers for the facilitator's
+    // own tip-slot and tx-inclusion view (see CompositeChainService).
     @Bean
-    FacilitatorChainService chainService() {
-        return new FacilitatorChainService() {
-            private RuntimeException notWired() {
-                return new IllegalStateException("FacilitatorChainService is wired in Task 12");
-            }
-            @Override public java.util.Optional<UtxoInfo> getUtxo(String txHashHex, int index) { throw notWired(); }
-            @Override public long getCurrentSlot() { throw notWired(); }
-            @Override public java.math.BigInteger getCoinsPerUtxoByte() { throw notWired(); }
-            @Override public String submitTransaction(byte[] txBytes) { throw notWired(); }
-            @Override public boolean awaitInclusion(String txHashHex, java.time.Duration timeout) { throw notWired(); }
-        };
+    FacilitatorChainService chainService(X402Properties props, ChainTipTracker tip, TxInclusionTracker inclusion) {
+        var blockfrost = new BlockfrostChainService(props.blockfrost().baseUrl(), props.blockfrost().projectId());
+        return new CompositeChainService(blockfrost, tip, inclusion, props.settle().pollInterval());
     }
 }
