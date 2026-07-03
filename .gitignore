@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+.gradle/
+data/
+*.log
+.env
+.env.local
+facilitator/.mvstore/
