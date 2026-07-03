@@ -8,15 +8,22 @@ See `docs/superpowers/plans/` and `docs/superpowers/specs/` for the design and i
 ## Consuming the x402 packages
 
 Run `./setup.sh` once to build the sibling `../x402/typescript` workspace, then
-consume the packages via npm `file:` links pointing at the built package dirs, e.g.:
+consume the packages via npm `file:` links pointing at the built package dirs.
 
-```
+The `file:` path is relative to the directory the `package.json` lives in. The
+demo's apps (`server/`, `frontend/`) sit one level below the repo root, so their
+manifests use `../../x402/typescript/...` (this is what the Task 13/14 briefs use).
+For example, `server/package.json`:
+
+```bash
 npm install --save \
-  "@x402/core@file:../x402/typescript/packages/core" \
-  "@x402/cardano@file:../x402/typescript/packages/mechanisms/cardano" \
-  "@x402/express@file:../x402/typescript/packages/http/express" \
-  "@x402/fetch@file:../x402/typescript/packages/http/fetch"
+  "@x402/core@file:../../x402/typescript/packages/core" \
+  "@x402/cardano@file:../../x402/typescript/packages/mechanisms/cardano" \
+  "@x402/express@file:../../x402/typescript/packages/http/express" \
+  "@x402/fetch@file:../../x402/typescript/packages/http/fetch"
 ```
+
+(From the repo root itself the prefix is a single `../x402/...`.)
 
 npm symlinks each `file:` dependency to its source package dir, so it never
 processes the packages' internal `workspace:~` specs. Node resolves the transitive
