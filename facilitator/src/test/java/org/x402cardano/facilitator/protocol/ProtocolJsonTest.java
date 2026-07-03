@@ -35,6 +35,34 @@ class ProtocolJsonTest {
     }
 
     @Test
+    void settleOkCarriesTransactionNetworkAndStatus() throws Exception {
+        SettleResponse r = SettleResponse.ok("abcd1234", "cardano:preprod", "addr_test1payer", "confirmed");
+        String json = mapper.writeValueAsString(r);
+        assertThat(json).contains("\"transaction\":\"abcd1234\"")
+                .contains("\"network\":\"cardano:preprod\"")
+                .contains("\"status\":\"confirmed\"");
+    }
+
+    @Test
+    void settleFailWithTxCarriesTransactionNetworkAndStatus() throws Exception {
+        SettleResponse r = SettleResponse.failWithTx("exact_cardano_settlement_failed",
+                "abcd1234", "cardano:preprod", "addr_test1payer", "mempool");
+        String json = mapper.writeValueAsString(r);
+        assertThat(json).contains("\"transaction\":\"abcd1234\"")
+                .contains("\"network\":\"cardano:preprod\"")
+                .contains("\"status\":\"mempool\"");
+    }
+
+    @Test
+    void settleNullStatusOmitsExtraAndDoesNotThrow() throws Exception {
+        SettleResponse ok = SettleResponse.ok("abcd1234", "cardano:preprod", "addr_test1payer", null);
+        SettleResponse withTx = SettleResponse.failWithTx("exact_cardano_settlement_failed",
+                "abcd1234", "cardano:preprod", "addr_test1payer", null);
+        assertThat(mapper.writeValueAsString(ok)).doesNotContain("extra").doesNotContain("status");
+        assertThat(mapper.writeValueAsString(withTx)).doesNotContain("extra").doesNotContain("status");
+    }
+
+    @Test
     void verifyValidOmitsInvalidReason() throws Exception {
         String json = mapper.writeValueAsString(VerifyResponse.valid("addr_test1payer"));
         assertThat(json).contains("\"isValid\":true").contains("\"payer\":\"addr_test1payer\"");
