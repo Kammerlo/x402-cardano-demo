@@ -21,6 +21,8 @@ import {
 } from "@evolution-sdk/evolution";
 import type { ClientCardanoSigner, ClientCardanoSignInput } from "@x402/cardano";
 
+import { buildMasumiLockInline } from "./masumiDatum";
+
 export interface Cip30WalletApi {
   // Minimal CIP-30 surface we rely on (window.cardano.<wallet>.enable() result).
   getNetworkId(): Promise<number>;
@@ -55,16 +57,31 @@ export async function createCip30Signer(
       const nonceTxHash = Buffer.from(nonceUtxo.transactionId.hash).toString("hex").toLowerCase();
       const nonce = `${nonceTxHash}#${Number(nonceUtxo.index)}`;
 
+      // "default" pays payTo a plain lovelace output (unchanged). "masumi"
+      // additionally attaches a 19-field inline escrow-lock datum built from
+      // input.extra (see masumiDatum.ts). The datum's `buyer` field must equal
+      // the payer the facilitator resolves — the nonce UTxO's owner — so it's
+      // derived from that UTxO, not from client.address() (usually the same
+      // wallet address, but the nonce UTxO is what the facilitator checks).
+      const method = String(input.extra?.assetTransferMethod ?? "default");
+      const datum =
+        method === "masumi"
+          ? buildMasumiLockInline(input.extra ?? {}, Address.toBech32(nonceUtxo.address))
+          : undefined;
+
       const signBuilder = await client
         .newTx()
         .collectFrom({ inputs: [nonceUtxo] })
         .payToAddress({
           address: Address.fromBech32(input.payTo),
           assets: Assets.fromLovelace(BigInt(input.amount)),
+          ...(datum ? { datum } : {}),
         })
         // Wall-clock ms; the SDK converts it to the TTL slot.
         .setValidity({ to: BigInt(Date.now()) + BigInt(input.maxTimeoutSeconds) * 1000n })
-        .build({ changeAddress: await client.address() });
+        // A datum-bearing output needs extra min-ADA above the plain-lovelace
+        // minimum; autoMinUtxo is a no-op bump for the plain "default" output.
+        .build({ changeAddress: await client.address(), autoMinUtxo: true });
 
       // Prompts the user's wallet extension for approval.
       const submitBuilder = await signBuilder.sign();
