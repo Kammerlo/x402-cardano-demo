@@ -605,6 +605,90 @@ img {
   color: var(--signal);
 }
 
+/* -- method picker ------------------------------------------------------------*/
+
+.method-picker {
+  margin-bottom: var(--space-4);
+}
+
+.method-picker__control {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.method-picker__option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: var(--space-2) var(--space-4);
+  background: var(--panel);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.method-picker__option + .method-picker__option {
+  border-left: 1px solid var(--rule);
+}
+
+.method-picker__option-label {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.method-picker__option-price {
+  font-size: 0.75rem;
+  color: var(--mist);
+}
+
+.method-picker__option[data-selected="true"] {
+  background: var(--signal-soft);
+}
+
+.method-picker__option[data-selected="true"] .method-picker__option-label {
+  color: var(--signal);
+}
+
+.method-picker__option[data-selected="true"] .method-picker__option-price {
+  color: var(--signal);
+}
+
+.method-picker__option:hover:not(:disabled):not([data-selected="true"]) {
+  background: var(--panel-raised);
+}
+
+.method-picker__option:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* -- reusable inline aside (masumi caveats, method-specific step notes) ------*/
+
+.step-note {
+  margin-top: var(--space-3);
+  max-width: 34rem;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--mist);
+  border-left: 2px solid var(--signal-line);
+  padding-left: var(--space-3);
+}
+
+.step-note strong {
+  color: var(--paper);
+  font-weight: 600;
+}
+
+.step-note code {
+  font-family: var(--font-mono);
+  color: var(--paper);
+}
+
 /* -- wallet picker ----------------------------------------------------------*/
 
 .wallet-picker__list {

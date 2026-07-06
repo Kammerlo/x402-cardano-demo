@@ -1,5 +1,7 @@
 import type { WalletInfo } from "../lib/cip30";
+import type { PaymentMethod } from "../x402/flow";
 import { WalletPicker, type WalletConnection } from "./WalletPicker";
+import { MethodPicker } from "./MethodPicker";
 
 export type RunState = "idle" | "running" | "done" | "error";
 
@@ -9,6 +11,8 @@ interface ControlPanelProps {
   connection: WalletConnection | null;
   connectError: string | null;
   onSelectWallet: (key: string) => void;
+  method: PaymentMethod;
+  onMethodChange: (method: PaymentMethod) => void;
   runState: RunState;
   onBegin: () => void;
   onReset: () => void;
@@ -22,11 +26,17 @@ export function ControlPanel({
   connection,
   connectError,
   onSelectWallet,
+  method,
+  onMethodChange,
   runState,
   onBegin,
   onReset,
 }: ControlPanelProps) {
   const onPreprod = connection?.networkId === 0;
+  const hint =
+    method === "masumi"
+      ? "Requests the paid resource, locks 5 tADA into the (demo) escrow contract it asks for, and shows every step of x402 doing its job."
+      : "Requests the paid resource, pays the 2 tADA it costs, and shows every step of x402 doing its job.";
 
   return (
     <section className="control-panel" aria-label="Connect a wallet and run the protocol">
@@ -47,9 +57,8 @@ export function ControlPanel({
       <div className="control-panel__step">
         <span className="control-panel__step-label mono-tag">Step B</span>
         <h2>Run the protocol</h2>
-        <p className="control-panel__hint">
-          Requests the paid resource, pays the 2 tADA it costs, and shows every step of x402 doing its job.
-        </p>
+        <MethodPicker method={method} onChange={onMethodChange} disabled={runState === "running"} />
+        <p className="control-panel__hint">{hint}</p>
         {runState === "done" || runState === "error" ? (
           <button type="button" className="btn btn--ghost" onClick={onReset}>
             Run it again

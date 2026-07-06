@@ -1,4 +1,4 @@
-import type { FlowStep } from "../x402/flow";
+import type { FlowStep, PaymentMethod } from "../x402/flow";
 import { STEP_COPY, STEP_ORDER, type StepId } from "../lib/stepCopy";
 import { asPaymentRequired, pickCardanoRequirements } from "../lib/x402Types";
 import { StepCard, type StepStatus } from "./StepCard";
@@ -8,13 +8,22 @@ import type { RunState } from "./ControlPanel";
 
 interface TimelineProps {
   steps: FlowStep[];
+  method: PaymentMethod;
   runState: RunState;
   errorStepId?: StepId;
   errorMessage?: string;
   payStartedAt: number | null;
 }
 
-export function Timeline({ steps, runState, errorStepId, errorMessage, payStartedAt }: TimelineProps) {
+/** For `masumi`, "confirmed" doesn't mean the same thing it does for
+ * `default` — the resource server's own response body already says so (see
+ * `/api/message-masumi`'s handler), but the settled step's static copy
+ * (`STEP_COPY.settled`) doesn't know which route ran. This fills that one gap
+ * without having to fork STEP_COPY per method. */
+const MASUMI_SETTLED_NOTE =
+  "For the masumi method, “confirmed” means the 5 tADA is now locked in the demo escrow — not delivered to the seller.";
+
+export function Timeline({ steps, method, runState, errorStepId, errorMessage, payStartedAt }: TimelineProps) {
   const byId = new Map(steps.map((s) => [s.id, s]));
   const requiredStep = byId.get("required");
   const maxTimeoutSeconds = requiredStep
@@ -43,6 +52,7 @@ export function Timeline({ steps, runState, errorStepId, errorMessage, payStarte
               maxTimeoutSeconds={id === "build" ? maxTimeoutSeconds : undefined}
               showWait={id === "pay" && Boolean(step) && !byId.has("settled") && runState === "running"}
               payStartedAt={payStartedAt}
+              methodNote={id === "settled" && method === "masumi" ? MASUMI_SETTLED_NOTE : undefined}
             />
           );
         })}
@@ -73,11 +83,22 @@ interface StepCardSlotProps {
   maxTimeoutSeconds?: number;
   showWait: boolean;
   payStartedAt: number | null;
+  methodNote?: string;
 }
 
 /** A `StepCard` plus, only for `pay`, the settlement-wait interstitial that
  * appears while the facilitator is chasing block inclusion. */
-function StepCardSlot({ index, id, step, status, error, maxTimeoutSeconds, showWait, payStartedAt }: StepCardSlotProps) {
+function StepCardSlot({
+  index,
+  id,
+  step,
+  status,
+  error,
+  maxTimeoutSeconds,
+  showWait,
+  payStartedAt,
+  methodNote,
+}: StepCardSlotProps) {
   return (
     <>
       <StepCard
@@ -88,6 +109,7 @@ function StepCardSlot({ index, id, step, status, error, maxTimeoutSeconds, showW
         status={status}
         error={error}
         maxTimeoutSeconds={maxTimeoutSeconds}
+        methodNote={methodNote}
       />
       {showWait && payStartedAt !== null && (
         <li className="timeline__interstitial">

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createCip30Signer } from "./x402/cip30Signer";
-import { runPaymentFlow, type FlowStep } from "./x402/flow";
+import { runPaymentFlow, type FlowStep, type PaymentMethod } from "./x402/flow";
 import type { ClientCardanoSigner } from "@x402/cardano";
 import { listWallets, type WalletInfo } from "./lib/cip30";
 import { STEP_COPY, STEP_ORDER, type StepId } from "./lib/stepCopy";
@@ -22,6 +22,7 @@ export default function App() {
   const [connectError, setConnectError] = useState<string | null>(null);
   const signerRef = useRef<ClientCardanoSigner | null>(null);
 
+  const [method, setMethod] = useState<PaymentMethod>("default");
   const [steps, setSteps] = useState<FlowStep[]>([]);
   const [runState, setRunState] = useState<RunState>("idle");
   const [errorMessage, setErrorMessage] = useState<string>();
@@ -61,10 +62,15 @@ export default function App() {
     setPayStartedAt(null);
     setRunState("running");
     try {
-      await runPaymentFlow(SERVER_URL, signer, (step) => {
-        setSteps((prev) => [...prev, step]);
-        if (step.id === "pay") setPayStartedAt(Date.now());
-      });
+      await runPaymentFlow(
+        SERVER_URL,
+        signer,
+        (step) => {
+          setSteps((prev) => [...prev, step]);
+          if (step.id === "pay") setPayStartedAt(Date.now());
+        },
+        method,
+      );
       setRunState("done");
     } catch (e) {
       setErrorMessage(describeError(e));
@@ -77,6 +83,14 @@ export default function App() {
     setErrorMessage(undefined);
     setPayStartedAt(null);
     setRunState("idle");
+  }
+
+  function handleMethodChange(next: PaymentMethod) {
+    setMethod(next);
+    // A prior run's timeline describes the *other* route (different price,
+    // different `extra`) — clear it so Step B doesn't show stale artifacts
+    // next to a freshly-picked method.
+    if (runState !== "idle") handleReset();
   }
 
   const errorStepId: StepId | undefined =
@@ -96,6 +110,8 @@ export default function App() {
           connection={connection}
           connectError={connectError}
           onSelectWallet={handleSelectWallet}
+          method={method}
+          onMethodChange={handleMethodChange}
           runState={runState}
           onBegin={handleBegin}
           onReset={handleReset}
@@ -104,6 +120,7 @@ export default function App() {
         {(steps.length > 0 || runState !== "idle") && (
           <Timeline
             steps={steps}
+            method={method}
             runState={runState}
             errorStepId={errorStepId}
             errorMessage={errorMessage}

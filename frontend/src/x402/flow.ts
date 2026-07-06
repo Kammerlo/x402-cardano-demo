@@ -18,16 +18,30 @@ export type FlowStep =
   | { id: "pay"; title: string; detail: unknown } // full PaymentPayload sent
   | { id: "settled"; title: string; detail: unknown }; // decoded SettleResponse + body
 
+/** Which route to pay for — purely a config choice, not a protocol detail:
+ * both routes speak the exact same x402 handshake below, they just carry a
+ * different `accepted.extra.assetTransferMethod` (see the server route
+ * definitions), which the signer branches on to build a plain output vs. a
+ * masumi escrow-lock datum. */
+export type PaymentMethod = "default" | "masumi";
+
+const METHOD_PATHS: Record<PaymentMethod, string> = {
+  default: "/api/message",
+  masumi: "/api/message-masumi",
+};
+
 export async function runPaymentFlow(
   serverUrl: string,
   signer: ClientCardanoSigner,
   onStep: (step: FlowStep) => void,
+  method: PaymentMethod = "default",
 ): Promise<void> {
-  const url = `${serverUrl}/api/message`;
+  const path = METHOD_PATHS[method];
+  const url = `${serverUrl}${path}`;
 
   // 1. Plain request -> expect 402 + PAYMENT-REQUIRED header.
   const first = await fetch(url);
-  onStep({ id: "request", title: "GET /api/message without payment", detail: { url, status: first.status } });
+  onStep({ id: "request", title: `GET ${path} without payment`, detail: { url, status: first.status } });
   if (first.status !== 402) throw new Error(`Expected 402, got ${first.status}`);
   const requiredHeader = first.headers.get("PAYMENT-REQUIRED");
   if (!requiredHeader) throw new Error("402 without PAYMENT-REQUIRED header (check server CORS exposedHeaders)");
