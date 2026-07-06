@@ -29,6 +29,16 @@ const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "http://localhost:4022";
 const PORT = Number(process.env.PORT ?? 4021);
 if (!PAY_TO) throw new Error("SERVER_CARDANO_ADDRESS is required (addr_test1...)");
 
+// DUMMY escrow address. The `masumi` assetTransferMethod locks funds into an
+// escrow contract instead of paying the seller directly. A real deployment
+// would point this at the actual Masumi `vested_pay` script address for the
+// target network (obtained from the Masumi Payment Service). Here we default
+// it to our own SERVER_CARDANO_ADDRESS — a plain, RECOVERABLE preprod address
+// the operator controls — so the demo can both lock and (manually) reclaim
+// the funds. A successful masumi settle therefore means the funds are LOCKED
+// in this escrow, NOT delivered to the seller.
+const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? PAY_TO;
+
 const app = express();
 
 // CORS: a BROWSER client can only read the x402 headers when we expose them,
@@ -67,6 +77,44 @@ app.use(
         description: "A message you can only read after paying 2 tADA",
         mimeType: "application/json",
       },
+      "GET /api/message-masumi": {
+        accepts: {
+          scheme: "exact",
+          network: "cardano:preprod",
+          payTo: MASUMI_ESCROW_ADDRESS,
+          // 5 tADA in lovelace. Masumi locks ADA into an escrow UTxO that also
+          // carries an inline datum, which raises the min-UTxO requirement
+          // above a plain address-to-address transfer — 5 tADA stays
+          // comfortably clear of that floor.
+          price: { amount: "5000000", asset: "lovelace" },
+          maxTimeoutSeconds: 600,
+          // DUMMY Masumi purchase identifiers — a real deployment gets these
+          // from the Masumi Payment Service for a registered agent purchase;
+          // fabricated here for the demo. These exact values are what the
+          // facilitator compares the on-chain lock datum against, so they
+          // must stay stable constants (not randomized) — the frontend
+          // copies them verbatim into the datum it builds.
+          extra: {
+            assetTransferMethod: "masumi", // real, required
+            paymentType: "Web3CardanoV2", // real constant, required by spec; advisory only (facilitator does not check it)
+            contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
+            sellerAddress: PAY_TO, // real — the seller's own preprod address; MUST be a public-key/non-script address
+            referenceKey: "a1b2c3d4", // DUMMY hex
+            referenceSignature: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // DUMMY hex, 32 bytes (>=16 required)
+            identifierFromPurchaser: "1122334455667788", // DUMMY hex (maps to datum buyer_nonce)
+            sellerNonce: "8877665544332211", // DUMMY hex
+            agentIdentifier: "deadbeefdeadbeefdeadbeefdeadbeef", // DUMMY hex
+            inputHash: "", // DUMMY (optional; empty)
+            collateralReturnLovelace: "0", // DUMMY (optional; 0)
+            payByTime: "2000000000000", // DUMMY POSIX ms
+            submitResultTime: "2000000600000", // DUMMY POSIX ms (>= payByTime)
+            unlockTime: "2000001200000", // DUMMY POSIX ms (>= submitResultTime)
+            externalDisputeUnlockTime: "2000001800000", // DUMMY POSIX ms (>= unlockTime)
+          },
+        },
+        description: "A message unlocked by locking 5 tADA into the (demo) Masumi escrow",
+        mimeType: "application/json",
+      },
     },
     resourceServer,
   ),
@@ -77,6 +125,16 @@ app.use(
 app.get("/api/message", (_req, res) => {
   res.json({
     message: "Hello from x402 on Cardano! This response was paid for on preprod.",
+    paidAt: new Date().toISOString(),
+  });
+});
+
+// Only reached AFTER the facilitator verified the masumi escrow lock. Note
+// that this is different from /api/message above: a masumi settle means the
+// funds were LOCKED into the (demo) escrow, not delivered to the seller.
+app.get("/api/message-masumi", (_req, res) => {
+  res.json({
+    message: "Hello from x402 on Cardano! 5 tADA was locked into the (demo) Masumi escrow to unlock this.",
     paidAt: new Date().toISOString(),
   });
 });
