@@ -68,6 +68,11 @@ export async function createCip30Signer(
         method === "masumi"
           ? buildMasumiLockInline(input.extra ?? {}, Address.toBech32(nonceUtxo.address))
           : undefined;
+      // A datum-bearing output needs extra min-ADA above the plain-lovelace
+      // minimum, so autoMinUtxo only applies to the masumi (datum) path — the
+      // "default" address-to-address path builds exactly as it did before
+      // this extension.
+      const autoMinUtxo = method === "masumi";
 
       const signBuilder = await client
         .newTx()
@@ -79,9 +84,7 @@ export async function createCip30Signer(
         })
         // Wall-clock ms; the SDK converts it to the TTL slot.
         .setValidity({ to: BigInt(Date.now()) + BigInt(input.maxTimeoutSeconds) * 1000n })
-        // A datum-bearing output needs extra min-ADA above the plain-lovelace
-        // minimum; autoMinUtxo is a no-op bump for the plain "default" output.
-        .build({ changeAddress: await client.address(), autoMinUtxo: true });
+        .build({ changeAddress: await client.address(), autoMinUtxo });
 
       // Prompts the user's wallet extension for approval.
       const submitBuilder = await signBuilder.sign();

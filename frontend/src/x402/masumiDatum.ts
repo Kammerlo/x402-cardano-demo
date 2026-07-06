@@ -66,6 +66,28 @@ function credentialToData(cred: MasumiCredential): Data.Data {
 }
 
 /**
+ * Asserts a credential-hash hex string is exactly the raw 28-byte hash (56
+ * lowercase hex chars, no CBOR/tag wrapping). The Java facilitator's
+ * `MasumiTransferVerifier` compares this datum's credential bytes against raw
+ * 28-byte hashes; if Evolution's `Credential.toHex` ever changed shape (e.g.
+ * started including a CBOR tag or a differently-sized hash), the mismatch
+ * would otherwise surface only as a silent `MASUMI_DATUM_MISMATCH` /
+ * `MASUMI_DATUM_INVALID` rejection at the facilitator. This turns that into
+ * an immediate, loud failure here instead.
+ *
+ * @param value - The lowercased candidate credential-hash hex string.
+ * @returns The same hex string, once validated.
+ */
+function assertCredentialHashHex(value: string): string {
+  if (!/^[0-9a-f]{56}$/.test(value)) {
+    throw new Error(
+      `Masumi datum: expected 28-byte credential hash, got ${value} (${value.length} chars) — Evolution Credential encoding may have changed`,
+    );
+  }
+  return value;
+}
+
+/**
  * Extracts the payment and (optional) stake credentials of a bech32 address.
  * Mirrors datum.ts `addressCredentials`.
  *
@@ -76,7 +98,7 @@ function addressCredentials(bech32: string): MasumiAddressCredentials {
   const parsed = Address.fromBech32(bech32);
   const payment: MasumiCredential = {
     isScript: parsed.paymentCredential._tag === "ScriptHash",
-    hash: Credential.toHex(parsed.paymentCredential).toLowerCase(),
+    hash: assertCredentialHashHex(Credential.toHex(parsed.paymentCredential).toLowerCase()),
   };
   if (!parsed.stakingCredential) {
     return { payment };
@@ -85,7 +107,7 @@ function addressCredentials(bech32: string): MasumiAddressCredentials {
     payment,
     stake: {
       isScript: parsed.stakingCredential._tag === "ScriptHash",
-      hash: Credential.toHex(parsed.stakingCredential).toLowerCase(),
+      hash: assertCredentialHashHex(Credential.toHex(parsed.stakingCredential).toLowerCase()),
     },
   };
 }
