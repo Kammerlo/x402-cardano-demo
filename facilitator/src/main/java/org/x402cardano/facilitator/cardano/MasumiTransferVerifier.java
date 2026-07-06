@@ -109,6 +109,15 @@ public class MasumiTransferVerifier implements AssetTransferMethodVerifier {
                 return Optional.of(ErrorCodes.MASUMI_DATUM_INVALID);
             }
 
+            // f16 seller_cooldown_time / f17 buyer_cooldown_time: unused by the checks
+            // but TS parseMasumiLockDatum reads BOTH as asInt (returns null ->
+            // MASUMI_DATUM_INVALID if either is not an integer). Read them to enforce the
+            // same "all 19 fields well-typed" contract -- a ClassCastException here is
+            // caught below. No value constraint (TS only requires they're ints; they're
+            // constant 0 at lock but TS doesn't enforce the 0).
+            ((BigIntPlutusData) f.get(16)).getValue();
+            ((BigIntPlutusData) f.get(17)).getValue();
+
             // STEP 4: field matching against the canonical requirements' extra.
             // buyer MUST be the payer; seller MUST be the declared seller.
             if (!sameCredentials(datumBuyer, addressCredentials(payer))) {

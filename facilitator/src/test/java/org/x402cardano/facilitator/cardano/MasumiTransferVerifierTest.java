@@ -120,6 +120,13 @@ class MasumiTransferVerifierTest {
         assertThat(r.invalidReason()).isEqualTo(ErrorCodes.MASUMI_DATUM_INVALID);
     }
 
+    @Test void rejectsNonIntegerCooldown() {
+        // f16 seller_cooldown_time is a Constr, not an int; TS parseMasumiLockDatum reads
+        // it as asInt and returns null -> MASUMI_DATUM_INVALID. Java must reject too.
+        VerifyResponse r = verify(TestTx.MasumiSpec.defaults().withCooldownCorrupt(true), defaultExtra());
+        assertThat(r.invalidReason()).isEqualTo(ErrorCodes.MASUMI_DATUM_INVALID);
+    }
+
     @Test void rejectsShortReferenceSignature() {
         // 8 bytes < the required 16.
         VerifyResponse r = verify(
