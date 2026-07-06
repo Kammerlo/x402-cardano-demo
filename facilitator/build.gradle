@@ -1,0 +1,34 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.5'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'org.x402cardano'
+version = '0.1.0'
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+
+repositories { mavenCentral() }
+
+ext {
+    yaciStoreVersion = '2.0.0-beta1'
+    // yaci-store 2.0.0-beta1 transitively pulls cardano-client-* 0.7.0-beta2; pin the
+    // whole cardano-client stack to that so the classpath is coherent (a mixed
+    // 0.6.4/0.7.0-beta2 stack moves classes like NetworkId between packages).
+    cardanoClientVersion = '0.7.0-beta2'
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    // yaci-store: core sync engine + event pipeline (N2N chainsync from a remote relay)
+    implementation "com.bloxbean.cardano:yaci-store-spring-boot-starter:${yaciStoreVersion}"
+    implementation "com.bloxbean.cardano:yaci-store-blocks-spring-boot-starter:${yaciStoreVersion}"
+    // cardano-client-lib: CBOR/tx model, crypto, Blockfrost backend
+    implementation "com.bloxbean.cardano:cardano-client-lib:${cardanoClientVersion}"
+    implementation "com.bloxbean.cardano:cardano-client-backend-blockfrost:${cardanoClientVersion}"
+    runtimeOnly 'com.h2database:h2'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.named('test') { useJUnitPlatform() }

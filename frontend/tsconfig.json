@@ -1,18 +1,16 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
+    "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "strict": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client", "node"],
+    // Vite (not tsc) bundles/emits the app; without this, `tsc -b` (used by
+    // the "build" script as a typecheck gate) writes stray compiled .js
+    // files next to the .tsx/.ts sources.
+    "noEmit": true
   },
-  "include": ["src/**/*"]
+  "include": ["src"]
 }
