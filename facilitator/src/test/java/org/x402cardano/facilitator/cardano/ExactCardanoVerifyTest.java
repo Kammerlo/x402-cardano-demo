@@ -216,10 +216,10 @@ class ExactCardanoVerifyTest {
 
     @Test void rejectsUnknownTransferMethod() {
         PaymentRequirements req = new PaymentRequirements("exact", "cardano:preprod", "lovelace",
-                "2000000", TestTx.PAY_TO, 600, Map.of("assetTransferMethod", "masumi"));
+                "2000000", TestTx.PAY_TO, 600, Map.of("assetTransferMethod", "script"));
         VerifyResponse r = scheme.verify(
                 payload(TestTx.buildBase64(TestTx.Spec.defaults()), TestTx.NONCE, req), req);
-        // masumi not implemented in this demo; TS uses unsupported_scheme for unknown methods
+        // "script" is not implemented in this demo; TS uses unsupported_scheme for unknown methods
         assertThat(r.invalidReason()).isEqualTo(ErrorCodes.UNSUPPORTED_SCHEME);
     }
 }

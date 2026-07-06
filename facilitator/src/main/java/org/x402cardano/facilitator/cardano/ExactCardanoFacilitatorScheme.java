@@ -29,7 +29,8 @@ public class ExactCardanoFacilitatorScheme implements SchemeNetworkFacilitator {
     private final FacilitatorChainService chain;
     private final CardanoTransactionDecoder decoder;
     private final SettleConfig config;
-    private final List<AssetTransferMethodVerifier> methodVerifiers = List.of(new DefaultTransferVerifier());
+    private final List<AssetTransferMethodVerifier> methodVerifiers =
+            List.of(new DefaultTransferVerifier(), new MasumiTransferVerifier());
     private final DuplicateSettlementCache duplicateCache; // Task 8
 
     public ExactCardanoFacilitatorScheme(FacilitatorChainService chain,

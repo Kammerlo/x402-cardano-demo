@@ -30,5 +30,12 @@ public final class ErrorCodes {
     public static final String SETTLEMENT_NOT_CONFIRMED = "exact_cardano_settlement_not_confirmed";
     public static final String DUPLICATE_SETTLEMENT = "duplicate_settlement";
 
+    // Masumi assetTransferMethod (verified byte-identical against
+    // ../x402/typescript/packages/mechanisms/cardano/src/constants.ts ERR_MASUMI_*).
+    public static final String MASUMI_CONTRACT_MISMATCH = INVALID_PAYLOAD + "_masumi_contract_mismatch";
+    public static final String MASUMI_DATUM_MISSING = INVALID_PAYLOAD + "_masumi_datum_missing";
+    public static final String MASUMI_DATUM_INVALID = INVALID_PAYLOAD + "_masumi_datum_invalid";
+    public static final String MASUMI_DATUM_MISMATCH = INVALID_PAYLOAD + "_masumi_datum_mismatch";
+
     private ErrorCodes() {}
 }
