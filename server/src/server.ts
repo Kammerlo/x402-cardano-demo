@@ -25,9 +25,20 @@ import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
 
 const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that receives the 2 tADA
-const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "http://localhost:4022";
+// This demo ships no facilitator of its own — point FACILITATOR_URL at an x402
+// facilitator that advertises the `exact` scheme on `cardano:preprod` via its
+// GET /supported endpoint. The middleware calls /supported at startup and
+// refuses to serve the paid routes if that kind is missing, so a wrong or
+// unreachable URL fails fast here rather than mid-payment.
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
 const PORT = Number(process.env.PORT ?? 4021);
 if (!PAY_TO) throw new Error("SERVER_CARDANO_ADDRESS is required (addr_test1...)");
+if (!FACILITATOR_URL) {
+  throw new Error(
+    "FACILITATOR_URL is required — point it at an x402 facilitator that supports " +
+      "the `exact` scheme on `cardano:preprod` (see README: 'Bring your own facilitator').",
+  );
+}
 
 // DUMMY: escrow address. The `masumi` assetTransferMethod locks funds into an
 // escrow contract instead of paying the seller directly. A real deployment

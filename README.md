@@ -1,14 +1,16 @@
 # x402 on Cardano — a payment-per-request demo
 
-A working, end-to-end implementation of the [x402 payment protocol](https://github.com/coinbase/x402) (`exact` scheme, v2, address-to-address) settling in real ADA on **Cardano preprod**. Three components — a browser client, a resource server, and a from-scratch Java facilitator — walk a single HTTP request through the full 402-pay-retry loop, with every protocol artifact shown on screen as it happens.
+A working, end-to-end demo of the [x402 payment protocol](https://github.com/coinbase/x402) (`exact` scheme, v2) settling in real ADA on **Cardano preprod**. Two components — a browser client and a resource server — walk a single HTTP request through the full 402-pay-retry loop, with every protocol artifact shown on screen as it happens.
 
-This is a **from-scratch Java port**, not a wrapper: the facilitator (`facilitator/`) reimplements the x402 core + Cardano `exact` scheme in Spring Boot, using [yaci-store](https://github.com/bloxbean/yaci-store) and [cardano-client-lib](https://github.com/bloxbean/cardano-client-lib) directly. It does not depend on the `org.x402` Java library, which is dead. The frontend and resource server, by contrast, *do* consume the TypeScript reference implementation from the sibling `../x402` repo via local `file:` links — see [Consuming the x402 TypeScript packages](#consuming-the-x402-typescript-packages) below.
+The third role in the protocol, the **facilitator**, is *not* shipped here: you point the resource server at one you run or host yourself. See [Bring your own facilitator](#bring-your-own-facilitator).
+
+Both components consume the TypeScript reference implementation from the sibling `../x402` repo via local `file:` links — see [Consuming the x402 TypeScript packages](#consuming-the-x402-typescript-packages).
 
 ## What this demonstrates
 
-x402 turns HTTP 402 Payment Required from a dormant status code into a working payment handshake: a client asks for a resource, the server names its price as a machine-readable JSON header, the client pays and retries, and the server hands back the resource plus a receipt. No accounts, no API keys, no subscription — just a signed transaction attached to a retried GET.
+x402 turns HTTP 402 Payment Required from a dormant status code into a working payment handshake: a client asks for a resource, the server names its price as a machine-readable header, the client pays and retries, and the server hands back the resource plus a receipt. No accounts, no API keys, no subscription — just a signed transaction attached to a retried GET.
 
-In this demo the resource is a single JSON message, priced at **2 tADA** (2,000,000 lovelace), paid **address-to-address** (`assetTransferMethod: "default"` — no smart contract, just a plain output to the seller's address) on **Cardano preprod**.
+In this demo the resource is a single JSON message, priced at **2 tADA** (2,000,000 lovelace), paid **address-to-address** (`assetTransferMethod: "default"` — no smart contract, just a plain output to the seller's address) on **Cardano preprod**. A second route demonstrates the [masumi escrow-lock method](#the-masumi-escrow-lock-method).
 
 **Protocol summary:** the client makes an unauthenticated request; the server replies `402` with a `PAYMENT-REQUIRED` header describing exactly what it will accept (scheme, network, asset, amount, payee address, timeout). The client's wallet builds and signs a Cardano transaction that pays that address, using one of its own UTxOs as an unforgeable, unreplayable **nonce** (spending a UTxO can only ever happen once). The client retries the identical request with a `PAYMENT-SIGNATURE` header carrying the signed transaction. The server doesn't understand Cardano signatures itself — it forwards the payload to a **facilitator**, a specialist service that verifies the transaction is well-formed and correctly pays the server (`/verify`), and — once the server's handler has produced the resource — submits it to the chain and waits for a block to include it (`/settle`). Only then does the server respond `200` with the resource and a `PAYMENT-RESPONSE` header carrying the transaction hash.
 
@@ -16,7 +18,7 @@ In this demo the resource is a single JSON message, priced at **2 tADA** (2,000,
 sequenceDiagram
     participant C as Client (frontend)
     participant S as Resource server
-    participant F as Facilitator
+    participant F as Facilitator (external)
     participant X as Cardano preprod
 
     C->>S: GET /api/message
@@ -24,71 +26,64 @@ sequenceDiagram
     Note over C: CIP-30 wallet builds + signs tx<br/>(nonce UTxO, output to payTo, TTL)
     C->>S: GET /api/message + PAYMENT-SIGNATURE header
     S->>F: POST /verify {paymentPayload, paymentRequirements}
-    F->>X: check nonce/inputs unspent (Blockfrost)
+    F->>X: check nonce/inputs unspent
     F-->>S: {isValid: true, payer}
     Note over S: handler runs, produces the resource
     S->>F: POST /settle {paymentPayload, paymentRequirements}
-    F->>X: submit transaction (Blockfrost)
-    F->>X: await inclusion (facilitator's own yaci-store index)
+    F->>X: submit transaction
+    F->>X: await block inclusion
     X-->>F: transaction observed in a block
     F-->>S: {success: true, transaction: txHash, extra: {status: "confirmed"}}
     S-->>C: 200 OK + resource JSON + PAYMENT-RESPONSE header
 ```
 
-The facilitator never holds funds and never signs anything — the client's wallet builds, signs, and pays the transaction fee for the whole transaction; the facilitator only **verifies** the signed transaction against the protocol's rules and **broadcasts** it.
+A facilitator never holds funds and never signs anything — the client's wallet builds, signs, and pays the transaction fee for the whole transaction; the facilitator only **verifies** the signed transaction against the protocol's rules and **broadcasts** it.
 
 ## Components
 
-| Component | Port | x402 role | `../x402` sources consumed / mirrored |
+| Component | Port | x402 role | `../x402` sources consumed |
 |---|---|---|---|
-| `frontend/` | 5173 | Client — builds and signs the payment via a CIP-30 wallet, drives the request/402/pay/retry/settle sequence step by step | Consumes `@x402/core`, `@x402/cardano` (types, `ClientCardanoSigner` interface) via npm `file:` links; implements `Cip30CardanoSigner` against Evolution SDK, mirroring the reference signer's build recipe in `.../mechanisms/cardano/src/signer.ts` |
-| `server/` | 4021 | Resource server — names its price, delegates verify/settle to the facilitator, serves the resource once paid | Consumes `@x402/express` (`paymentMiddleware`) and `@x402/cardano` (`ExactCardanoScheme`, server role) via npm `file:` links |
-| `facilitator/` | 4022 | Facilitator — verifies signed transactions against the 7 spec rules and settles them on-chain | **Mirrors, does not consume**: a from-scratch Java port of `.../packages/core` (facilitator registry, HTTP envelope) and `.../packages/mechanisms/cardano/src/exact/facilitator` (the `exact` Cardano scheme's verify/settle logic and error codes) |
+| `frontend/` | 5173 | Client — builds and signs the payment via a CIP-30 wallet, drives the request/402/pay/retry/settle sequence step by step | `@x402/core`, `@x402/cardano` (types, `ClientCardanoSigner` interface) via npm `file:` links; implements a CIP-30 signer against Evolution SDK, mirroring the reference signer's build recipe in `.../mechanisms/cardano/src/signer.ts` |
+| `server/` | 4021 | Resource server — names its price, delegates verify/settle to the facilitator, serves the resource once paid | `@x402/express` (`paymentMiddleware`) and `@x402/cardano` (`ExactCardanoScheme`, server role) via npm `file:` links |
 
-The frontend and server sit one level below the repo root and consume the sibling `../x402/typescript` workspace's packages as npm `file:` dependencies (see [below](#consuming-the-x402-typescript-packages)) — `setup.sh` builds that workspace once before either app's `npm install` will resolve. The facilitator has zero dependency on `../x402`; it is Java 21 / Spring Boot 3.4.5, built with Gradle, embedding **yaci-store 2.0.2** (an N2N chain indexer) and **cardano-client-lib** (pinned to **0.7.2** in `build.gradle` so the whole cardano-client-* stack — CBOR model, crypto, Blockfrost backend, and the version yaci-store itself pulls transitively — resolves to one coherent set of classes).
+Both sit one level below the repo root and consume the sibling `../x402/typescript` workspace's packages as npm `file:` dependencies — `setup.sh` builds that workspace once before either app's `npm install` will resolve.
 
-## The facilitator's correctness story
+## Bring your own facilitator
 
-The facilitator is the part of this demo worth reading carefully — it is a faithful, tested reimplementation of the spec's `exact` Cardano scheme, not a toy.
+This demo ships no facilitator. `server/.env`'s **`FACILITATOR_URL` is required** — point it at an x402 facilitator whose `GET /supported` advertises:
 
-### The 7 verification rules
+```json
+{ "x402Version": 2, "scheme": "exact", "network": "cardano:preprod" }
+```
 
-All logic lives in `ExactCardanoFacilitatorScheme` (`facilitator/src/main/java/org/x402cardano/facilitator/cardano/ExactCardanoFacilitatorScheme.java`), which ports `.../mechanisms/cardano/src/exact/facilitator/scheme.ts` check-for-check, preserving the TS error-code strings verbatim. `verify()` runs, in order:
+The resource server calls `/supported` at startup and refuses to serve its paid routes if that kind is missing, so a wrong or unreachable URL fails fast at boot rather than mid-payment.
 
-1. **Network** — the payload's declared network and the server's requirements must normalize (via CIP-34 alias resolution, e.g. `cip34:0-1` → `cardano:preprod`) to the same supported network; the transaction body's own `networkId` field, if present, must agree too (`network_mismatch`, `invalid_exact_cardano_payload_network_id_mismatch`).
-2. **Signed** — the transaction must carry at least one vkey or script witness (`invalid_exact_cardano_payload_unsigned`), and every vkey witness must Ed25519-verify against the blake2b-256 hash of the **raw wire body bytes** — never a re-serialization, which could hash different bytes than what was actually signed (`invalid_exact_cardano_payload_invalid_signature`).
-3. **TTL** — if the transaction declares a `ttl` or `validityIntervalStart`, it's checked against the facilitator's own view of the current slot (`invalid_exact_cardano_payload_ttl_expired` / `..._not_yet_valid`).
-4. **Nonce-UTxO replay guard** — the payload's `nonce` (`txHash#index`) must be one of the transaction's own inputs (`..._nonce_not_in_inputs`), and that UTxO must currently be unspent on-chain (`..._nonce_not_on_chain`); every *other* declared input must also still be unspent (`..._input_not_available`) — the nonce UTxO's owning address becomes the verified `payer`.
-5. **Recipient + asset + amount** — some transaction output must pay the exact `payTo` address at least the required amount (`>=`, overpayment allowed) of the exact asset (`..._recipient_mismatch` / `..._asset_mismatch` / `..._amount_insufficient`).
-6. **Min-UTxO** — the matching output must clear Cardano's minimum-ADA-per-UTxO floor, computed from the *live* protocol parameter `coinsPerUtxoByte` (`..._min_utxo_insufficient`) — a transaction that pays exactly 2 tADA but whose output CBOR size pushes it under the floor is rejected even though the amount check passed.
-7. **Transfer method** — `assetTransferMethod` is read from the **canonical `requirements.extra`** (never the client-echoed `accepted.extra`, which a malicious client could tamper with) and dispatched to an `AssetTransferMethodVerifier` strategy; `default` (address-to-address) is a no-op, `masumi`/`script` are explicit not-yet-supported stubs.
+**Note there is no public hosted x402 facilitator that supports Cardano.** The library's built-in default (`https://x402.org/facilitator`) serves EVM/SVM networks only — pointing at it will fail the `/supported` check.
 
-Failures before the nonce is resolved return `payer: ""`; anything unexpected is caught and mapped to `invalid_exact_cardano_payload_verification_error`.
+The one Cardano-capable implementation in the x402 tree is the **TypeScript reference facilitator** at `../x402/e2e/facilitators/typescript`, which supports `exact` on `cardano:preprod` and implements the masumi transfer method too. To run it locally on port 4022:
 
-### Blockfrost vs. embedded yaci-store — the chain-authority split
+```bash
+cd ../x402/e2e/facilitators/typescript
+pnpm install
+EVM_PRIVATE_KEY=0x0000000000000000000000000000000000000000000000000000000000000001 \
+SVM_PRIVATE_KEY=<any-well-formed-svm-key> \
+BLOCKFROST_PROJECT_ID=<your-preprod-project-id> \
+BLOCKFROST_PREPROD_URL=https://cardano-preprod.blockfrost.io/api/v0 \
+CARDANO_NETWORK=cardano:preprod \
+pnpm start
+```
 
-The facilitator talks to Cardano through two different services, each answering a different *kind* of question (`FacilitatorChainService`, composed in `CompositeChainService`):
+Then set `FACILITATOR_URL=http://localhost:4022` in `server/.env`.
 
-- **Blockfrost** (`BlockfrostChainService`) answers **full-UTxO-set questions**: is this specific outref still unspent (nonce + every other input), what are the live protocol parameters (for min-UTxO), and it performs transaction submission. These questions need a complete, authoritative view of chain state that an indexer syncing only from the tip cannot provide — a UTxO could have been spent in a block the facilitator hasn't indexed yet, or could predate where its own sync started.
-- **The embedded yaci-store** (`ChainTipTracker` + `TxInclusionTracker`, both in `facilitator/src/main/java/org/x402cardano/facilitator/chain/yaci/`) is the facilitator's **own** chain view, built by syncing N2N from a public preprod relay starting near the tip. It answers two questions Blockfrost is the wrong tool for: the **current slot** for the TTL check (a value the facilitator wants to be able to trust independent of a third party being up), and **settlement confirmation** — "has this transaction actually landed in a block *I* observed?" rather than "does a third-party API say so." `TxInclusionTracker` records `(txHash → slot)` from `TransactionEvent`s and — critically — **invalidates entries beyond a rollback point** on `RollbackEvent` (Ouroboros rollbacks are real; "confirmed" here means "observed in a block that's still part of the best chain," matching the TS reference's semantics, not "was in some block once").
-
-This composition is config-driven (`FacilitatorConfig`), so a future full-sync deployment could hand the UTxO-set checks to yaci-store too without touching the scheme logic.
-
-### Duplicate-settlement cache
-
-`DuplicateSettlementCache` (in-memory, keyed on the base64 transaction string, 120 s TTL, 1024-entry cap) guards the window between claiming a settlement and its on-chain confirmation. `settle()` claims **atomically before submission** (`tryClaim`, CAS-loop) so two concurrent `/settle` calls for the same transaction can never both submit — one gets `success: true`, the other `duplicate_settlement`. If submission itself throws, the claim is **released** so a legitimate retry can proceed; if submission succeeds but confirmation times out, the claim is **kept** (the transaction may still land, and a caller retrying blindly must not cause a second broadcast). The nonce UTxO being spent on-chain is the durable, cross-instance guard against replay; this cache only covers the brief unconfirmed window on a single instance.
-
-### Rollback handling
-
-Because `TxInclusionTracker` is the facilitator's own source of truth for "confirmed," it has to handle the chain reorganizing under it. On every `RollbackEvent` from yaci-store it drops every recorded inclusion at a slot past the rollback point, so a transaction that *was* confirmed in a since-abandoned block stops being confirmed — `awaitInclusion()` (which polls this tracker) will correctly resume waiting rather than reporting a false positive.
+Two things about that command: it registers Cardano only when `BLOCKFROST_PROJECT_ID` is set, and it **hard-exits without `EVM_PRIVATE_KEY` and `SVM_PRIVATE_KEY`** even for a Cardano-only run — hence the throwaway values above (they're never used for a Cardano payment; the facilitator needs no funds on any chain, it only broadcasts what the client already signed).
 
 ## Prerequisites
 
-- **Node.js 20+** and **pnpm** (`npm i -g pnpm` if you don't have it — `setup.sh` needs it to build the sibling `../x402/typescript` workspace).
-- **Java 21.** The Gradle wrapper is pinned to Gradle 8.14, which will not run on a JVM newer than 21 (18/25/26 etc. all fail) — point `JAVA_HOME` at a JDK 21 install before running any `./gradlew` command.
-- A **Blockfrost preprod project id** — free at [blockfrost.io](https://blockfrost.io). The facilitator uses it for UTxO lookups, protocol parameters, and transaction submission; the frontend uses it (in-browser) for wallet UTxO selection via Evolution SDK.
+- **Node.js 20+** and **pnpm** (`npm i -g pnpm` — `setup.sh` needs it to build the sibling `../x402/typescript` workspace).
+- **An x402 facilitator supporting `exact` on `cardano:preprod`** — see [above](#bring-your-own-facilitator).
+- A **Blockfrost preprod project id** — free at [blockfrost.io](https://blockfrost.io). The frontend uses it (in-browser) for wallet UTxO selection and protocol parameters via Evolution SDK; your facilitator will need chain access of its own too.
 - A **CIP-30 browser wallet** (Eternl or Lace) set to **preprod**, funded with test ADA from the [Cardano testnets faucet](https://docs.cardano.org/cardano-testnets/tools/faucet).
-- A **second preprod address** (can be a second address in the same wallet, or anywhere else you control) to act as the server's `payTo` — the address that receives the 2 tADA each request pays.
+- A **second preprod address** (a second address in the same wallet, or anywhere else you control) to act as the server's `payTo` — the address that receives the 2 tADA each request pays.
 
 ## Consuming the x402 TypeScript packages
 
@@ -101,7 +96,7 @@ Because `TxInclusionTracker` is the facilitator's own source of truth for "confi
 "@x402/cardano": "file:../../x402/typescript/packages/mechanisms/cardano"
 ```
 
-npm symlinks each `file:` dependency to its source package directory, so it never has to resolve the packages' internal `workspace:~` specs itself — Node resolves those transitive deps through pnpm's `node_modules` inside the `../x402` monorepo, which is why `./setup.sh` must run first. This direct `file:` link path works as-is; no tarball fallback was needed for this repo. (If npm ever rejects a transitive `workspace:` spec in your environment, the fallback is `pnpm --filter <pkg> pack --pack-destination <dir>` in `../x402/typescript`, pointing the demo's dependency at the resulting `.tgz`, plus an npm `"overrides"` entry so `@x402/cardano` doesn't try to resolve `@x402/core` from the registry.)
+npm symlinks each `file:` dependency to its source package directory, so it never has to resolve the packages' internal `workspace:~` specs itself — Node resolves those transitive deps through pnpm's `node_modules` inside the `../x402` monorepo, which is why `./setup.sh` must run first. (If npm ever rejects a transitive `workspace:` spec in your environment, the fallback is `pnpm --filter <pkg> pack --pack-destination <dir>` in `../x402/typescript`, pointing the demo's dependency at the resulting `.tgz`, plus an npm `"overrides"` entry so `@x402/cardano` doesn't try to resolve `@x402/core` from the registry.)
 
 ## Run it
 
@@ -113,20 +108,17 @@ Run these in order, each in its own terminal.
 ./setup.sh
 ```
 
-**2. Facilitator** — point `JAVA_HOME` at a JDK 21, provide your Blockfrost project id:
+**2. Start your facilitator** — see [Bring your own facilitator](#bring-your-own-facilitator). Confirm it's up and Cardano-capable before continuing:
 
 ```bash
-cd facilitator
-JAVA_HOME=/path/to/jdk-21 BLOCKFROST_PROJECT_ID=<your-preprod-project-id> ./gradlew bootRun
+curl -s localhost:4022/supported | grep cardano:preprod
 ```
-
-Wait until `curl localhost:4022/health` returns `{"status":"ok",...}` (it starts as `"syncing"` while the embedded yaci-store catches up to the tip — `ok` means its last-seen block is under 90 s old). `GET /supported` should return the `exact` / `cardano:preprod` kind immediately, even while still syncing.
 
 **3. Resource server:**
 
 ```bash
 cd server
-cp .env.example .env   # set SERVER_CARDANO_ADDRESS to your second preprod address
+cp .env.example .env   # set SERVER_CARDANO_ADDRESS and FACILITATOR_URL
 npm install
 npm run dev
 ```
@@ -142,6 +134,8 @@ npm run dev
 
 Open **http://localhost:5173**, connect your preprod wallet, and walk through the payment.
 
+> Start the facilitator **before** the server. The server validates `/supported` at boot, so starting it first produces `ECONNREFUSED ...:4022` and a `no supported payment kinds loaded from any facilitator` error.
+
 ## What to watch
 
 The frontend walks the protocol in five steps, each showing its own artifact:
@@ -152,15 +146,17 @@ The frontend walks the protocol in five steps, each showing its own artifact:
 4. **Retried with proof of payment** — the identical `GET` fires again with a `PAYMENT-SIGNATURE` header carrying the signed transaction, base64-encoded.
 5. **Confirmed on-chain** — the facilitator submits and waits for block inclusion (typically 20–60 s on preprod); the response finally carries the resource JSON plus a `PAYMENT-RESPONSE` header with the transaction hash — click through to Cardanoscan preprod (`https://preprod.cardanoscan.io/transaction/<hash>`) to see it for real.
 
-Meanwhile, watch the facilitator's own logs: you'll see it work through `/verify` (one log line per check as it dispatches to Blockfrost for UTxO lookups) and then `/settle` (submission, followed by polling its own yaci-store index until the transaction shows up in a block).
+Watch your facilitator's logs alongside: you'll see it work through `/verify` (checking the nonce and every other input is still unspent) and then `/settle` (submission, then waiting for the transaction to appear in a block).
 
 ## The masumi escrow-lock method
 
-Alongside the default address-to-address transfer, this demo also implements a second `assetTransferMethod`: **`masumi`**, modeled on the [Masumi](https://www.masumi.network/) agent-payment protocol's escrow lock. Instead of a plain output to the seller, the client's wallet pays into an escrow contract — Masumi's `vested_pay` Aiken validator — carrying a **19-field inline Plutus datum** that records the purchase: buyer/seller addresses, a reference key + signature, buyer/seller nonces, an agent identifier, and four lifecycle timestamps (`pay_by_time`, `submit_result_time`, `unlock_time`, `external_dispute_unlock_time`). x402 here only covers the **lock** — releasing the escrow later (paying the seller, refunding the buyer, or resolving a dispute) is a separate on-chain action outside this demo's scope.
+Alongside the default address-to-address transfer, this demo also exercises a second `assetTransferMethod`: **`masumi`**, modeled on the [Masumi](https://www.masumi.network/) agent-payment protocol's escrow lock. Instead of a plain output to the seller, the client's wallet pays into an escrow — Masumi's `vested_pay` validator — carrying a **19-field inline Plutus datum** that records the purchase: buyer/seller addresses, a reference key + signature, buyer/seller nonces, an agent identifier, and four lifecycle timestamps (`pay_by_time`, `submit_result_time`, `unlock_time`, `external_dispute_unlock_time`). x402 here only covers the **lock** — releasing the escrow later (paying the seller, refunding the buyer, or resolving a dispute) is a separate on-chain action outside this demo's scope.
 
 **Try it:** in Step B, pick **"Masumi escrow-lock (5 tADA)"** instead of **"Address-to-address (2 tADA)"** before running the flow. The identical five-step protocol runs — only the requested route, the transaction's output, and the settlement's meaning differ; the UI calls this out inline (the timeline's final step reads "confirmed" as "locked in escrow," not "paid to the seller").
 
-**Dummy purchase data.** A real Masumi purchase is registered through the Masumi Payment Service, which issues the reference key/signature, nonces, and lifecycle timestamps that make a lock claimable. This demo has no such service to call, so it fabricates fixed, plausible-looking values instead — every one is marked `// DUMMY:` in code, in two places that must agree byte-for-byte:
+Your facilitator must implement the masumi rules for this route to verify — the TS reference facilitator does.
+
+**Dummy purchase data.** A real Masumi purchase is registered through the Masumi Payment Service, which issues the reference key/signature, nonces, and lifecycle timestamps that make a lock claimable. This demo has no such service to call, so it fabricates fixed, plausible-looking values instead — every one is marked `// DUMMY:` in code (`grep -rn "// DUMMY:" server/src frontend/src`), in two places that must agree byte-for-byte:
 - **Server** — `server/src/server.ts`, the `GET /api/message-masumi` route's `extra` block: `referenceKey`, `referenceSignature`, `identifierFromPurchaser`, `sellerNonce`, `agentIdentifier`, `inputHash`, `collateralReturnLovelace`, and the four timestamps.
 - **Frontend** — `frontend/src/x402/masumiDatum.ts`, which copies those same `extra` values verbatim into the inline datum it builds.
 
@@ -168,24 +164,25 @@ Alongside the default address-to-address transfer, this demo also implements a s
 
 **The escrow is a recoverable stand-in, not the real contract.** `MASUMI_ESCROW_ADDRESS` (`server/.env.example`) defaults to `SERVER_CARDANO_ADDRESS` when unset — a plain preprod address the operator controls, not the deployed `vested_pay` script address. That lets the demo lock funds and later reclaim them manually, at the cost of not actually enforcing Masumi's spending conditions on-chain. A real deployment would point `MASUMI_ESCROW_ADDRESS` at the real script address for the target network instead.
 
-**Two routes, one scheme.** `GET /api/message` advertises `extra.assetTransferMethod: "default"` (2 tADA, plain output); `GET /api/message-masumi` advertises `extra.assetTransferMethod: "masumi"` (5 tADA — comfortably clear of the higher min-UTxO a datum-bearing output requires). Both are served by the same `ExactCardanoScheme` / `ExactCardanoFacilitatorScheme`; verification rule 7 dispatches to `MasumiTransferVerifier` or `DefaultTransferVerifier` (`facilitator/src/main/java/org/x402cardano/facilitator/cardano/`) based on the **canonical requirements'** `extra.assetTransferMethod`, never the client-echoed copy.
+**Two routes, one scheme.** `GET /api/message` advertises `extra.assetTransferMethod: "default"` (2 tADA, plain output); `GET /api/message-masumi` advertises `extra.assetTransferMethod: "masumi"` (5 tADA — comfortably clear of the higher min-UTxO a datum-bearing output requires). Both are served by the same `ExactCardanoScheme`; the facilitator dispatches on the **canonical requirements'** `extra.assetTransferMethod`, never the client-echoed copy.
 
-**Known risk: cross-component datum parity.** The frontend builds the 19-field datum with Evolution SDK; the facilitator parses it with cardano-client-lib. Both mirror the same field layout, and the facilitator's Java test suite (`MasumiTransferVerifierTest`) proves its parser against a Java-built fixture of that exact layout — but the two libraries can emit CBOR differently (Evolution uses indefinite-length encoding, cardano-client-lib definite-length), which is why the facilitator compares datum fields **structurally**, never by raw hex. What hasn't been exercised end-to-end is a live wallet run against a live facilitator. If that ever rejects with `invalid_exact_cardano_payload_masumi_datum_invalid`, the likely culprit is the address-datum encoding (fields 0/`buyer` and 2/`seller`) — the fragile part of a hand-rolled address-to-`Constr` conversion — see `frontend/src/x402/masumiDatum.ts` and `MasumiTransferVerifier.java`.
+**Known risk: cross-component datum parity.** The frontend builds the 19-field datum with Evolution SDK; your facilitator parses it with whatever CBOR stack it uses. The two can emit CBOR differently (Evolution uses indefinite-length encoding, some parsers definite-length), which is why a facilitator should compare datum fields **structurally**, never by raw hex. If a masumi payment is rejected with `invalid_exact_cardano_payload_masumi_datum_invalid`, the likely culprit is the address-datum encoding (fields 0/`buyer` and 2/`seller`) — the fragile part of a hand-rolled address-to-`Constr` conversion — see `frontend/src/x402/masumiDatum.ts`, which guards it with a 28-byte credential-hash assertion.
 
 ## Extending
 
-- **Adding another transfer method** (e.g. a custom escrow contract): implement `AssetTransferMethodVerifier` (`facilitator/src/main/java/org/x402cardano/facilitator/cardano/AssetTransferMethodVerifier.java`) — `supports(method)` + `check(extra, requirements, tx, payer)` — and add it to the list `ExactCardanoFacilitatorScheme` consults. `DefaultTransferVerifier` (`default`, address-to-address) and `MasumiTransferVerifier` (`masumi`, escrow lock, described [above](#the-masumi-escrow-lock-method)) are the two reference implementations.
-- **Adding a network** (e.g. `cardano:mainnet`, `cardano:preview`): both are already recognized by `CardanoNetworks` (CIP-34 alias resolution + `networkId()` mapping); register a second `ExactCardanoFacilitatorScheme` instance against the new network in `X402FacilitatorRegistry` (`FacilitatorConfig`), pointed at chain services configured for that network.
-- **Running this facilitator against the upstream x402 conformance suite**: `../x402/e2e/facilitators/external-proxies/` is built for exactly this — wire this facilitator's `http://localhost:4022` endpoints in as an external proxy per that directory's README and run the e2e suite against a real implementation instead of the TS reference facilitator.
+- **Adding another transfer method** (e.g. a custom escrow contract): add the method's fields to the route's `extra` in `server/src/server.ts`, teach `frontend/src/x402/masumiDatum.ts` (or a sibling builder) to construct whatever the output needs, and make sure your facilitator implements the matching verification — `@x402/cardano`'s facilitator-role scheme dispatches on `extra.assetTransferMethod` and is the place to add it.
+- **Adding a network** (e.g. `cardano:mainnet`, `cardano:preview`): change `network` on the route's `accepts` in `server/src/server.ts` and the frontend's chain/preset, and point `FACILITATOR_URL` at a facilitator advertising that network in `/supported`.
+- **Swapping facilitators**: it's a single env var. Anything speaking the x402 v2 facilitator HTTP contract (`POST /verify`, `POST /settle`, `GET /supported`) and advertising `exact` on your network will work.
 
 ## Troubleshooting
 
-- **`./gradlew` fails to launch / weird JVM errors:** you're on a JDK newer (or older) than 21. Gradle 8.14 (this project's pinned wrapper version) does not run on Java 18+ (other than 21) reliably in this setup — set `JAVA_HOME` to a JDK 21 install for every `./gradlew` invocation.
+- **`ECONNREFUSED` / `no supported payment kinds loaded from any facilitator` at server startup:** your facilitator isn't running, `FACILITATOR_URL` points somewhere wrong, or it doesn't advertise `exact` on `cardano:preprod`. Start it first and confirm with `curl -s $FACILITATOR_URL/supported`.
 - **`npm install` fails to resolve `@x402/cardano` or a transitive `workspace:` specifier:** you skipped `./setup.sh`, or your npm version resolves `file:` links differently than expected. Re-run `./setup.sh` from the repo root first; if it still fails, use the `pnpm pack` tarball fallback described in [Consuming the x402 TypeScript packages](#consuming-the-x402-typescript-packages).
-- **Blockfrost `402`/`429` responses:** you've hit your Blockfrost project's rate limit or daily cap (the free tier is generous but not unlimited, and this demo calls it on every verify/settle). Wait for the window to reset, or use a project with a higher tier.
-- **Facilitator `/health` stuck on `"syncing"` for a long time, or verify/settle behaving oddly after restarts:** the embedded yaci-store keeps its H2 index under `facilitator/data/`. If it gets into a bad state (e.g. after an unclean shutdown mid-sync), stop the facilitator and delete `facilitator/data/` to force a clean resync from the tip.
+- **Blockfrost `402`/`429` responses:** you've hit your Blockfrost project's rate limit or daily cap. Wait for the window to reset, or use a project with a higher tier.
 - **Wallet is connected but nothing works / transactions fail to build:** your CIP-30 wallet is very likely set to **mainnet** instead of **preprod** — check the wallet's network setting; the frontend expects preprod addresses (`addr_test1...`) throughout.
 
 ---
 
-*Facilitator test suite: 69 tests, all green (`cd facilitator && JAVA_HOME=<jdk21> ./gradlew test`). `server` and `frontend` both pass `npm run typecheck`; `frontend` also passes `npm run build`. The full live payment flow (connect wallet → pay real preprod tADA → settle → see it on Cardanoscan) is the one step that needs your own Blockfrost project id and a funded wallet — everything else in this README has been verified end-to-end short of that.*
+*`server` and `frontend` both pass `npm run typecheck`; `frontend` also passes `npm run build`. The full live payment flow (connect wallet → pay real preprod tADA → settle → see it on Cardanoscan) needs your own facilitator, Blockfrost project id, and a funded wallet.*
+
+*A from-scratch Java/Spring Boot facilitator (yaci-store + cardano-client-lib, 85 tests) previously lived in this repo under `facilitator/`. It was removed in favour of pointing at an external facilitator; it remains in this branch's git history if you want it back — `git log -- facilitator/`.*
