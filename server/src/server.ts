@@ -23,11 +23,23 @@ import express from "express";
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
+import { LoggingFacilitatorClient } from "./facilitatorLogging.js";
 
 const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that receives the 2 tADA
-const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "http://localhost:4022";
+// This demo ships no facilitator of its own — point FACILITATOR_URL at an x402
+// facilitator that advertises the `exact` scheme on `cardano:preprod` via its
+// GET /supported endpoint. The middleware calls /supported at startup and
+// refuses to serve the paid routes if that kind is missing, so a wrong or
+// unreachable URL fails fast here rather than mid-payment.
+const FACILITATOR_URL = process.env.FACILITATOR_URL;
 const PORT = Number(process.env.PORT ?? 4021);
 if (!PAY_TO) throw new Error("SERVER_CARDANO_ADDRESS is required (addr_test1...)");
+if (!FACILITATOR_URL) {
+  throw new Error(
+    "FACILITATOR_URL is required — point it at an x402 facilitator that supports " +
+      "the `exact` scheme on `cardano:preprod` (see README: 'Bring your own facilitator').",
+  );
+}
 
 // DUMMY: escrow address. The `masumi` assetTransferMethod locks funds into an
 // escrow contract instead of paying the seller directly. A real deployment
@@ -51,13 +63,41 @@ app.use(
   }),
 );
 
-// The resource server delegates verify/settle to the Java facilitator and
+// The resource server delegates verify/settle to the external facilitator and
 // registers the Cardano "exact" scheme for building PaymentRequirements.
 // On the first request it calls GET /supported on the facilitator and refuses
 // to serve the route if (exact, cardano:preprod) is not advertised.
+//
+// The client wrapper exists purely for diagnostics: paymentMiddleware turns any
+// payment failure into a bare `402 {}`, so without it the facilitator's actual
+// reason code is invisible. See ./facilitatorLogging.ts.
 const resourceServer = new x402ResourceServer(
-  new HTTPFacilitatorClient({ url: FACILITATOR_URL }),
+  new LoggingFacilitatorClient(
+    new HTTPFacilitatorClient({ url: FACILITATOR_URL }),
+    FACILITATOR_URL,
+  ),
 ).register("cardano:preprod", new ExactCardanoScheme());
+
+// Request-level tracing so a client-visible `402 {}` is explainable from the
+// server log alone: this prints whether the request even carried a payment,
+// and pairs the response status with the [facilitator] lines logged above it.
+app.use((req, res, next) => {
+  const paid = Boolean(req.get("PAYMENT-SIGNATURE") ?? req.get("X-PAYMENT"));
+  res.on("finish", () => {
+    if (!req.path.startsWith("/api/")) return;
+    if (res.statusCode === 402 && paid) {
+      console.error(
+        `[server] ${req.method} ${req.path} → 402 with a payment attached: the facilitator ` +
+          `REJECTED it. The reason is in the [facilitator] line logged just above.`,
+      );
+    } else if (res.statusCode === 402) {
+      console.log(`[server] ${req.method} ${req.path} → 402 (no payment yet — this is the normal first request)`);
+    } else {
+      console.log(`[server] ${req.method} ${req.path} → ${res.statusCode}${paid ? " (paid)" : ""}`);
+    }
+  });
+  next();
+});
 
 app.use(
   paymentMiddleware(

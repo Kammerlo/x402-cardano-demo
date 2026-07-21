@@ -1,1 +1,0 @@
-org.springframework.boot.env.EnvironmentPostProcessor=org.x402cardano.facilitator.config.SyncFromTipEnvironmentPostProcessor

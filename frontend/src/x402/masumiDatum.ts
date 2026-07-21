@@ -7,10 +7,12 @@
  * `../x402/typescript/packages/mechanisms/cardano/src/exact/masumi/datum.ts`
  * (`buildMasumiLockDatum` / `addressToData` / `credentialToData`). Any
  * deviation from datum.ts's Constr indices, field order, or address-datum
- * shape will make the facilitator's `MasumiTransferVerifier` reject the lock
- * with `MASUMI_DATUM_INVALID` or `MASUMI_DATUM_MISMATCH` — see
- * `facilitator/src/main/java/org/x402cardano/facilitator/cardano/MasumiTransferVerifier.java`
- * for the parser this datum must satisfy.
+ * shape will make the facilitator reject the lock with
+ * `invalid_exact_cardano_payload_masumi_datum_invalid` or
+ * `..._masumi_datum_mismatch`. The parser this datum must satisfy lives in
+ * whichever facilitator `FACILITATOR_URL` points at; the normative one is
+ * `verifyMasumiLock` in
+ * `../x402/typescript/packages/mechanisms/cardano/src/exact/masumi/verify.ts`.
  *
  * The address-Constr shape (`Constr 0 [paymentCred, stakeOption]`) is
  * hand-rolled here with `Data.constr` rather than delegated to Evolution's
