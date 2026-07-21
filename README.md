@@ -84,7 +84,9 @@ Both consume the sibling `../x402/typescript` workspace via npm `file:` links (`
 
 Two caveats on the masumi route, both deliberate for a demo:
 
-- **The purchase data is fake.** A real Masumi lock gets its reference key/signature, nonces, and timestamps from the Masumi Payment Service. This demo fabricates fixed values — every one marked `// DUMMY:` in code (`grep -rn "// DUMMY:" server/src frontend/src`), in the server's route `extra` and copied verbatim into the datum by `frontend/src/x402/masumiDatum.ts`. The two must agree byte-for-byte or the facilitator rejects the lock.
+- **The purchase data is fake.** A real Masumi lock gets its reference key/signature, nonces, and timestamps from the Masumi Payment Service. This demo fabricates fixed values — every one marked `// DUMMY:` in code (`grep -rn "// DUMMY:" server/src frontend/src`).
+
+  Note **which side supplies what**, because the datum is filled from two places. The server's route `extra` declares only the **seller-side** fields (reference key/signature, `sellerNonce`, `agentIdentifier`, the four timestamps, `collateralReturnLovelace`); the wallet passes them straight to `buildMasumiLockInline()` from `@x402/cardano`, which encodes them into the datum verbatim — they must agree byte-for-byte or the facilitator rejects the lock. The **buyer-side** fields (`buyer_nonce`, `input_hash`, `buyer_return_address`) are *not* in the 402 at all — the server answers an unauthenticated request and cannot know them, so the wallet fills them itself. The demo passes no buyer input at all, so the library generates a fresh `buyer_nonce` (14–26 hex characters, the range Masumi accepts) and leaves the other two at their contract defaults; a real integration would pass the values its Masumi purchase was created with.
 - **The escrow is a recoverable stand-in.** `MASUMI_ESCROW_ADDRESS` defaults to `SERVER_CARDANO_ADDRESS` — a plain address you control, not the real `vested_pay` script — so demo funds stay reclaimable. A real deployment would point it at the actual script address.
 
 ## Troubleshooting

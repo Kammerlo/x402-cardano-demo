@@ -19,9 +19,12 @@ import {
   Transaction,
   preprod,
 } from "@evolution-sdk/evolution";
-import type { ClientCardanoSigner, ClientCardanoSignInput } from "@x402/cardano";
-
-import { buildMasumiLockInline } from "./masumiDatum";
+import {
+  buildMasumiLockInline,
+  type CardanoExtraMasumi,
+  type ClientCardanoSigner,
+  type ClientCardanoSignInput,
+} from "@x402/cardano";
 
 export interface Cip30WalletApi {
   // Minimal CIP-30 surface we rely on (window.cardano.<wallet>.enable() result).
@@ -58,21 +61,40 @@ export async function createCip30Signer(
       const nonce = `${nonceTxHash}#${Number(nonceUtxo.index)}`;
 
       // "default" pays payTo a plain lovelace output (unchanged). "masumi"
-      // additionally attaches a 19-field inline escrow-lock datum built from
-      // input.extra (see masumiDatum.ts). The datum's `buyer` field must equal
-      // the payer the facilitator resolves — the nonce UTxO's owner — so it's
-      // derived from that UTxO, not from client.address() (usually the same
-      // wallet address, but the nonce UTxO is what the facilitator checks).
+      // additionally attaches the 19-field inline escrow-lock datum, which
+      // @x402/cardano builds for us from the server's seller-side extra. The
+      // third argument is the buyer-side half of the datum: the server answered
+      // an unauthenticated request and cannot know it, so the wallet supplies
+      // it. Passing nothing lets the library generate a fresh buyer nonce and
+      // take the contract defaults — enough for this demo, which has no real
+      // Masumi purchase to bind to.
+      //
+      // The datum's `buyer` field must equal the payer the facilitator resolves
+      // — the nonce UTxO's owner — so it's derived from that UTxO, not from
+      // client.address() (usually the same wallet address, but the nonce UTxO
+      // is what the facilitator checks).
       const method = String(input.extra?.assetTransferMethod ?? "default");
       const datum =
         method === "masumi"
-          ? buildMasumiLockInline(input.extra ?? {}, Address.toBech32(nonceUtxo.address))
+          ? buildMasumiLockInline(
+              input.extra as unknown as CardanoExtraMasumi,
+              Address.toBech32(nonceUtxo.address),
+            )
           : undefined;
       // A datum-bearing output needs extra min-ADA above the plain-lovelace
       // minimum, so autoMinUtxo only applies to the masumi (datum) path — the
       // "default" address-to-address path builds exactly as it did before
       // this extension.
       const autoMinUtxo = method === "masumi";
+
+      // Masumi: pin the validity upper bound to pay_by_time (see .setValidity
+      // below). Masumi invalidates a lock that lands after that deadline, so
+      // the transaction must be unable to settle past it.
+      const payByTime = input.extra?.payByTime;
+      const ttlMs =
+        method === "masumi" && typeof payByTime === "string"
+          ? BigInt(payByTime)
+          : BigInt(Date.now()) + BigInt(input.maxTimeoutSeconds) * 1000n;
 
       const signBuilder = await client
         .newTx()
@@ -82,8 +104,12 @@ export async function createCip30Signer(
           assets: Assets.fromLovelace(BigInt(input.amount)),
           ...(datum ? { datum } : {}),
         })
-        // Wall-clock ms; the SDK converts it to the TTL slot.
-        .setValidity({ to: BigInt(Date.now()) + BigInt(input.maxTimeoutSeconds) * 1000n })
+        // Wall-clock ms; the SDK converts it to the TTL slot. For masumi the
+        // upper bound is anchored to the datum's pay_by_time so the lock can
+        // never settle past the escrow deadline — the facilitator rejects a
+        // masumi lock whose TTL could land after it. Other methods just use
+        // maxTimeoutSeconds.
+        .setValidity({ to: ttlMs })
         .build({ changeAddress: await client.address(), autoMinUtxo });
 
       // Prompts the user's wallet extension for approval.

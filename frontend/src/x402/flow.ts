@@ -10,6 +10,7 @@ import {
 } from "@x402/core/http";
 import { ExactCardanoScheme } from "@x402/cardano/exact/client";
 import type { ClientCardanoSigner } from "@x402/cardano";
+import { pickCardanoRequirements } from "../lib/x402Types";
 
 export type FlowStep =
   | { id: "request"; title: string; detail: { url: string; status: number } }
@@ -49,9 +50,7 @@ export async function runPaymentFlow(
   onStep({ id: "required", title: "Server describes the price (decoded PAYMENT-REQUIRED)", detail: paymentRequired });
 
   // 2. Pick the cardano:preprod exact option and build+sign the payment tx.
-  const accepted = paymentRequired.accepts.find(
-    (a: { scheme: string; network: string }) => a.scheme === "exact" && a.network === "cardano:preprod",
-  );
+  const accepted = pickCardanoRequirements(paymentRequired);
   if (!accepted) throw new Error("Server offered no exact/cardano:preprod option");
   const scheme = new ExactCardanoScheme(signer);
   const result = await scheme.createPaymentPayload(2, accepted);

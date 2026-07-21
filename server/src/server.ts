@@ -20,7 +20,11 @@ import express from "express";
 // NOTE: HTTPFacilitatorClient and x402ResourceServer live under the
 // "./server" subpath export of @x402/core, not the package root (the root
 // only re-exports x402Version) — confirmed against the built .d.ts files.
-import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
+import {
+  HTTPFacilitatorClient,
+  x402ResourceServer,
+  type RoutesConfig,
+} from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
 import { LoggingFacilitatorClient } from "./facilitatorLogging.js";
@@ -34,6 +38,9 @@ const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that recei
 const FACILITATOR_URL = process.env.FACILITATOR_URL;
 const PORT = Number(process.env.PORT ?? 4021);
 if (!PAY_TO) throw new Error("SERVER_CARDANO_ADDRESS is required (addr_test1...)");
+// Re-bound after the guard: control-flow narrowing does not reach inside
+// buildRoutes(), which is called per request rather than inline.
+const SELLER_ADDRESS: string = PAY_TO;
 if (!FACILITATOR_URL) {
   throw new Error(
     "FACILITATOR_URL is required — point it at an x402 facilitator that supports " +
@@ -49,7 +56,44 @@ if (!FACILITATOR_URL) {
 // the operator controls — so the demo can both lock and (manually) reclaim
 // the funds. A successful masumi settle therefore means the funds are LOCKED
 // in this escrow, NOT delivered to the seller.
-const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? PAY_TO;
+const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? SELLER_ADDRESS;
+
+// DUMMY: agent identifier. Masumi's registry defines this as "policy ID + asset
+// name" of the on-chain agent NFT, validated as 57-250 characters
+// (`agentIdentifier` in masumi-payment-service's registry schema), so it is a
+// 56-hex-character policy id concatenated with the asset name in hex — no
+// separator. This one is fabricated but structurally valid; a real deployment
+// gets it from the Masumi Registry once the agent is minted.
+const MASUMI_AGENT_IDENTIFIER =
+  "3f2c9a1b7e4d6058c1a9b3f7d2e5648a0c7b1f93e6d4a28c5b0f7e31" + // policy id (56 hex)
+  "4d6173756d6944656d6f4167656e74303031"; // asset name: "MasumiDemoAgent001"
+
+// How long the client has to get its lock on-chain. The wallet anchors the
+// transaction's validity upper bound to `payByTime`, and the facilitator
+// rejects a lock whose TTL could settle after it, so this doubles as the
+// transaction's lifetime and must exceed the wallet's signing + submit time.
+const MASUMI_PAY_BY_WINDOW_MS = 15 * 60_000;
+
+/**
+ * Builds the four Masumi lock deadlines relative to now.
+ *
+ * Real deadlines come from the Masumi payment request the seller creates **per
+ * incoming request** (`POST /payment`), so they must be generated per 402 — a
+ * value fixed at startup silently expires while the server keeps running, and
+ * every later lock is then rejected on the deadline rule. Ordering is
+ * `payByTime <= submitResultTime <= unlockTime <= externalDisputeUnlockTime`.
+ *
+ * @returns The four POSIX-millisecond bounds as decimal strings.
+ */
+function masumiDeadlines(): Record<string, string> {
+  const payByTime = Date.now() + MASUMI_PAY_BY_WINDOW_MS;
+  return {
+    payByTime: String(payByTime),
+    submitResultTime: String(payByTime + 10 * 60_000),
+    unlockTime: String(payByTime + 20 * 60_000),
+    externalDisputeUnlockTime: String(payByTime + 30 * 60_000),
+  };
+}
 
 const app = express();
 
@@ -99,14 +143,21 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(
-  paymentMiddleware(
-    {
+/**
+ * Builds the route payment config. Called **per request** so the masumi
+ * deadlines are fresh; `paymentMiddleware` takes a static routes object, so a
+ * config built once at startup would freeze `payByTime` at boot and start
+ * rejecting locks as soon as that deadline passed.
+ *
+ * @returns The routes config for `paymentMiddleware`.
+ */
+function buildRoutes(): RoutesConfig {
+  return {
       "GET /api/message": {
         accepts: {
           scheme: "exact",
           network: "cardano:preprod",
-          payTo: PAY_TO,
+          payTo: SELLER_ADDRESS,
           // 2 tADA in lovelace. Comfortably above the ~1 ADA min-UTxO the
           // facilitator enforces (verification rule 7).
           price: { amount: "2000000", asset: "lovelace" },
@@ -128,37 +179,43 @@ app.use(
           // comfortably clear of that floor.
           price: { amount: "5000000", asset: "lovelace" },
           maxTimeoutSeconds: 600,
-          // DUMMY: Masumi purchase identifiers — a real deployment gets these
-          // from the Masumi Payment Service for a registered agent purchase;
-          // fabricated here for the demo. These exact values are what the
-          // facilitator compares the on-chain lock datum against, so they
-          // must stay stable constants (not randomized) — the frontend
-          // copies them verbatim into the datum it builds.
+          // The server declares only the SELLER-side datum fields. A real
+          // deployment gets these from the Masumi payment request it creates
+          // per request (POST /payment on its Masumi Payment Service); they are
+          // fabricated here for the demo. The facilitator compares the on-chain
+          // lock datum against these exact values, so they must stay stable
+          // constants (not randomized) — the frontend copies them verbatim.
+          //
+          // The BUYER-side fields (identifierFromPurchaser -> buyer_nonce,
+          // inputHash, buyerReturnAddress) are deliberately absent: this 402
+          // answers an unauthenticated request, so the server does not know who
+          // is calling and cannot fill them. The wallet supplies them when it
+          // builds the datum (frontend/src/x402/cip30Signer.ts, via
+          // buildMasumiLockInline() from @x402/cardano).
           extra: {
             assetTransferMethod: "masumi", // real, required
             paymentType: "Web3CardanoV2", // real constant, required by spec; advisory only (facilitator does not check it)
             contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
-            sellerAddress: PAY_TO, // real — the seller's own preprod address; MUST be a public-key/non-script address
+            sellerAddress: SELLER_ADDRESS, // real — the seller's own preprod address; MUST be a public-key/non-script address
             referenceKey: "a1b2c3d4", // DUMMY: hex
             referenceSignature: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // DUMMY: hex, 32 bytes (>=16 required)
-            identifierFromPurchaser: "1122334455667788", // DUMMY: hex (maps to datum buyer_nonce)
             sellerNonce: "8877665544332211", // DUMMY: hex
-            agentIdentifier: "deadbeefdeadbeefdeadbeefdeadbeef", // DUMMY: hex
-            inputHash: "", // DUMMY: optional, empty
+            agentIdentifier: MASUMI_AGENT_IDENTIFIER, // DUMMY value, real shape (policy id + asset name)
             collateralReturnLovelace: "0", // DUMMY: optional, 0
-            payByTime: "2000000000000", // DUMMY: POSIX ms
-            submitResultTime: "2000000600000", // DUMMY: POSIX ms (>= payByTime)
-            unlockTime: "2000001200000", // DUMMY: POSIX ms (>= submitResultTime)
-            externalDisputeUnlockTime: "2000001800000", // DUMMY: POSIX ms (>= unlockTime)
+            // Generated per request, as a real payment request would be.
+            ...masumiDeadlines(),
           },
         },
         description: "A message unlocked by locking 5 tADA into the (demo) Masumi escrow",
         mimeType: "application/json",
       },
-    },
-    resourceServer,
-  ),
-);
+  };
+}
+
+// Construct the middleware per request so buildRoutes() re-runs and the masumi
+// deadlines are relative to *this* request. (Building it once would be cheaper,
+// but would pin payByTime to server start.)
+app.use((req, res, next) => paymentMiddleware(buildRoutes(), resourceServer)(req, res, next));
 
 // Only reached AFTER the facilitator verified the payment; the middleware
 // settles it after we return (status < 400).
