@@ -182,6 +182,29 @@ app.use((req, res, next) => {
 });
 
 /**
+ * The seller-side half of a Masumi lock datum, shared by both masumi routes
+ * (ADA and native-token). Built per request so the deadlines stay fresh — see
+ * masumiDeadlines(). The facilitator compares the on-chain datum against these
+ * exact values, so the wallet must copy them verbatim.
+ *
+ * @returns The masumi `extra` block for a route's `accepts`.
+ */
+function masumiExtra(): Record<string, string> {
+  return {
+    assetTransferMethod: "masumi", // real, required
+    paymentType: MASUMI_PAYMENT_SOURCE_TYPE, // real constant from the library; advisory only (facilitator does not check it)
+    contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
+    sellerAddress: SELLER_ADDRESS, // real — the seller's own preprod address; MUST be a public-key/non-script address
+    referenceKey: "a1b2c3d4", // DUMMY: hex
+    referenceSignature: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // DUMMY: hex, 32 bytes (>=16 required)
+    sellerNonce: "8877665544332211", // DUMMY: hex
+    agentIdentifier: MASUMI_AGENT_IDENTIFIER, // DUMMY value, real shape (policy id + asset name)
+    collateralReturnLovelace: "0", // DUMMY: optional, 0
+    ...masumiDeadlines(),
+  };
+}
+
+/**
  * Builds the route payment config. Called **per request** so the masumi
  * deadlines are fresh; `paymentMiddleware` takes a static routes object, so a
  * config built once at startup would freeze `payByTime` at boot and start
@@ -230,20 +253,7 @@ function buildRoutes(): RoutesConfig {
           // is calling and cannot fill them. The wallet supplies them when it
           // builds the datum (frontend/src/x402/cip30Signer.ts, via
           // buildMasumiLockInline() from @x402/cardano).
-          extra: {
-            assetTransferMethod: "masumi", // real, required
-            paymentType: MASUMI_PAYMENT_SOURCE_TYPE, // real constant from the library; advisory only (facilitator does not check it)
-            contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
-            sellerAddress: SELLER_ADDRESS, // real — the seller's own preprod address; MUST be a public-key/non-script address
-            referenceKey: "a1b2c3d4", // DUMMY: hex
-            referenceSignature: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // DUMMY: hex, 32 bytes (>=16 required)
-            sellerNonce: "8877665544332211", // DUMMY: hex
-            agentIdentifier: MASUMI_AGENT_IDENTIFIER, // DUMMY value, real shape (policy id + asset name)
-            collateralReturnLovelace: "0", // DUMMY: optional, 0
-            // Refreshed as they near expiry rather than pinned at boot; see
-            // masumiDeadlines() for why they cannot change per request.
-            ...masumiDeadlines(),
-          },
+          extra: masumiExtra(),
         },
         description: "A message unlocked by locking 5 tADA into the (demo) Masumi escrow",
         mimeType: "application/json",
@@ -263,6 +273,22 @@ function buildRoutes(): RoutesConfig {
           extra: { assetTransferMethod: "default" },
         },
         description: "A message you can only read after paying 0.10 tUSDM",
+        mimeType: "application/json",
+      },
+      "GET /api/message-masumi-usdm": {
+        accepts: {
+          scheme: "exact",
+          network: "cardano:preprod",
+          payTo: MASUMI_ESCROW_ADDRESS,
+          // Masumi escrow lock paid in a NATIVE TOKEN rather than ADA. Here the
+          // requested amount is the token; the lovelace on the escrow output is
+          // purely structural (post-result min-UTxO + collateral) and the wallet
+          // computes it via masumiTokenLockLovelace() — see the signer.
+          price: { amount: "250000", asset: USDM_ASSET },
+          maxTimeoutSeconds: 600,
+          extra: masumiExtra(),
+        },
+        description: "A message unlocked by locking 0.25 tUSDM into the (demo) Masumi escrow",
         mimeType: "application/json",
       },
   };
@@ -311,6 +337,15 @@ app.get("/api/message-masumi", (_req, res) => {
 app.get("/api/message-usdm", (_req, res) => {
   res.json({
     message: "Hello from x402 on Cardano! This response was paid for with 0.10 tUSDM, a native token.",
+    paidAt: new Date().toISOString(),
+  });
+});
+
+// Only reached AFTER the facilitator verified the tUSDM escrow lock: the
+// masumi datum plus a native-token output rather than ADA.
+app.get("/api/message-masumi-usdm", (_req, res) => {
+  res.json({
+    message: "Hello from x402 on Cardano! 0.25 tUSDM was locked into the (demo) Masumi escrow to unlock this.",
     paidAt: new Date().toISOString(),
   });
 });

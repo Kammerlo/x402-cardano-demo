@@ -16,12 +16,14 @@ import {
   Address,
   Assets,
   Client,
+  Data,
   Transaction,
   preprod,
 } from "@evolution-sdk/evolution";
 import {
   buildMasumiLockInline,
   LOVELACE_ASSET,
+  masumiTokenLockLovelace,
   parseAssetUnit,
   type CardanoExtraMasumi,
   type ClientCardanoSigner,
@@ -50,6 +52,32 @@ function buildOutputAssets(asset: string, amount: bigint): Assets.Assets {
 export interface Cip30WalletApi {
   // Minimal CIP-30 surface we rely on (window.cardano.<wallet>.enable() result).
   getNetworkId(): Promise<number>;
+}
+
+/**
+ * Reads the live `coinsPerUtxoByte` protocol parameter.
+ *
+ * Fetched straight from Blockfrost because a CIP-30-backed Evolution client
+ * exposes no `getProtocolParameters()` on its promise API (only seed-backed
+ * clients do). Needed to size a Masumi token lock, which cannot rely on
+ * `autoMinUtxo` — see buildOutputAssets' masumi branch.
+ *
+ * @param blockfrost - Provider connection.
+ * @returns The `coinsPerUtxoByte` value.
+ */
+async function fetchCoinsPerUtxoByte(blockfrost: {
+  baseUrl: string;
+  projectId: string;
+}): Promise<bigint> {
+  const res = await fetch(`${blockfrost.baseUrl}/epochs/latest/parameters`, {
+    headers: { project_id: blockfrost.projectId },
+  });
+  if (!res.ok) throw new Error(`Blockfrost returned ${res.status} fetching protocol parameters`);
+  const params = (await res.json()) as { coins_per_utxo_size?: string };
+  if (!params.coins_per_utxo_size) {
+    throw new Error("Blockfrost protocol parameters did not include coins_per_utxo_size");
+  }
+  return BigInt(params.coins_per_utxo_size);
 }
 
 /** `txHash#index` for a wallet UTxO, matching the x402 nonce format. */
@@ -180,12 +208,6 @@ export async function createCip30Signer(
       // client.address() (usually the same wallet address, but the nonce UTxO
       // is what the facilitator checks).
       const method = String(input.extra?.assetTransferMethod ?? "default");
-      if (method === "masumi" && !isLovelace) {
-        // Masumi v2 escrows lock ADA. A token lock needs the escrow output's
-        // min-ADA derived from the datum size (see masumiTokenLockLovelace in
-        // @x402/cardano's reference signer) — out of scope for this demo.
-        throw new Error(`The masumi escrow-lock demo pays lovelace, not ${input.asset}`);
-      }
       const datum =
         method === "masumi"
           ? buildMasumiLockInline(
@@ -199,6 +221,30 @@ export async function createCip30Signer(
       // raises the coin to the protocol minimum for those two cases, leaving a
       // plain lovelace payment to build exactly as before.
       const autoMinUtxo = method === "masumi" || !isLovelace;
+
+      // A native-token Masumi lock is the one case autoMinUtxo cannot size.
+      // The escrow output's lovelace there is purely structural: the requested
+      // amount is the TOKEN, and the coin alongside it must still clear the
+      // *post-result* min-UTxO (the datum grows once result_hash is filled)
+      // and cover the collateral the seller later reclaims. autoMinUtxo only
+      // measures today's smaller datum, so compute the floor explicitly —
+      // mirroring the reference signer in @x402/cardano.
+      let outputAssets = buildOutputAssets(input.asset, BigInt(input.amount));
+      if (method === "masumi" && datum && !isLovelace) {
+        const coinsPerUtxoByte = await fetchCoinsPerUtxoByte(blockfrost);
+        const datumBytes = Data.toCBORHex(datum.data).length / 2;
+        const masumiExtra = input.extra as unknown as CardanoExtraMasumi;
+        const collateral = masumiExtra.collateralReturnLovelace
+          ? BigInt(masumiExtra.collateralReturnLovelace)
+          : 0n;
+        const { policyId, assetNameHex } = parseAssetUnit(input.asset);
+        outputAssets = Assets.addByHex(
+          Assets.fromLovelace(masumiTokenLockLovelace(datumBytes, collateral, coinsPerUtxoByte)),
+          policyId,
+          assetNameHex,
+          BigInt(input.amount),
+        );
+      }
 
       // Masumi: pin the validity upper bound to pay_by_time (see .setValidity
       // below). Masumi invalidates a lock that lands after that deadline, so
@@ -214,7 +260,7 @@ export async function createCip30Signer(
         .collectFrom({ inputs: [nonceUtxo] })
         .payToAddress({
           address: Address.fromBech32(input.payTo),
-          assets: buildOutputAssets(input.asset, BigInt(input.amount)),
+          assets: outputAssets,
           ...(datum ? { datum } : {}),
         })
         // Wall-clock ms; the SDK converts it to the TTL slot. For masumi the

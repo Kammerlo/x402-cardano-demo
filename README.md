@@ -78,7 +78,7 @@ The facilitator never holds funds and never signs — the client's wallet pays t
 
 All three consume the sibling `../x402/typescript` workspace via npm `file:` links (`@x402/core`, `@x402/cardano`, `@x402/express`), which is why `./setup.sh` must run before `npm install`. `@x402/cardano` isn't on npm, so there's no registry alternative. (If npm ever rejects a transitive `workspace:` spec, fall back to `pnpm --filter <pkg> pack` in `../x402/typescript` and point the dependency at the `.tgz`.)
 
-## Three payment routes
+## Four payment routes
 
 `GET /api/message` — **2 tADA, address-to-address** (`assetTransferMethod: "default"`): a plain output to the seller. This is the default path.
 
@@ -90,6 +90,8 @@ All three consume the sibling `../x402/typescript` workspace via npm `file:` lin
 > ```
 
 `GET /api/message-masumi` — **5 tADA, escrow lock** (`assetTransferMethod: "masumi"`): modeled on [Masumi](https://www.masumi.network/)'s agent-payment escrow. Instead of paying the seller, the wallet locks the ADA into an escrow output carrying a **19-field inline Plutus datum** (buyer/seller, reference key + signature, nonces, agent id, four lifecycle timestamps). x402 covers only the **lock**; releasing it later is out of scope. Pick it in the UI's Step B before running the flow. The included facilitator verifies these locks (the masumi rules come with `@x402/cardano`'s scheme); a substitute facilitator must implement them too.
+
+`GET /api/message-masumi-usdm` — **0.25 tUSDM, escrow lock**: the two extensions combined — a Masumi lock whose value is a native token. This one case can't rely on `autoMinUtxo`: the requested amount is the *token*, so the escrow output's lovelace is purely structural and must clear the **post-result** min-UTxO (the datum grows once `result_hash` is filled) and cover the collateral. The wallet sizes it with `masumiTokenLockLovelace()` from `@x402/cardano`, using live protocol parameters.
 
 Two caveats on the masumi route, both deliberate for a demo:
 

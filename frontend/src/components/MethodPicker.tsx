@@ -10,6 +10,7 @@ const OPTIONS: MethodOption[] = [
   { id: "default", label: "Address-to-address", price: "2 tADA" },
   { id: "masumi", label: "Masumi escrow-lock", price: "5 tADA" },
   { id: "usdm", label: "Native token", price: "0.10 tUSDM" },
+  { id: "masumi-usdm", label: "Masumi + token", price: "0.25 tUSDM" },
 ];
 
 interface MethodPickerProps {
