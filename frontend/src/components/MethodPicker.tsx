@@ -9,6 +9,7 @@ interface MethodOption {
 const OPTIONS: MethodOption[] = [
   { id: "default", label: "Address-to-address", price: "2 tADA" },
   { id: "masumi", label: "Masumi escrow-lock", price: "5 tADA" },
+  { id: "usdm", label: "Native token", price: "0.10 tUSDM" },
 ];
 
 interface MethodPickerProps {

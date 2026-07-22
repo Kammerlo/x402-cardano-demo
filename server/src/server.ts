@@ -27,7 +27,7 @@ import {
 } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
-import { MASUMI_PAYMENT_SOURCE_TYPE } from "@x402/cardano";
+import { MASUMI_PAYMENT_SOURCE_TYPE, USDM_PREPROD_ASSET } from "@x402/cardano";
 import { LoggingFacilitatorClient } from "./facilitatorLogging.js";
 
 const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that receives the 2 tADA
@@ -58,6 +58,14 @@ if (!FACILITATOR_URL) {
 // the funds. A successful masumi settle therefore means the funds are LOCKED
 // in this escrow, NOT delivered to the seller.
 const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? SELLER_ADDRESS;
+
+// The native token the tUSDM route charges in, as x402 names assets:
+// `policyId.assetNameHex`. Defaults to @x402/cardano's preprod tUSDM constant
+// (policy e675b46e…, asset name hex of "tUSDM" behind the CIP-68 (333) prefix,
+// 6 decimals) so it matches what the library's own Money-price fallback would
+// pick. Overridable because more than one tUSDM-named token exists on preprod —
+// set USDM_ASSET to whichever one your wallet actually holds.
+const USDM_ASSET = process.env.USDM_ASSET ?? USDM_PREPROD_ASSET;
 
 // DUMMY: agent identifier. Masumi's registry defines this as "policy ID + asset
 // name" of the on-chain agent NFT, validated as 57-250 characters
@@ -238,6 +246,23 @@ function buildRoutes(): RoutesConfig {
           },
         },
         description: "A message unlocked by locking 5 tADA into the (demo) Masumi escrow",
+        mimeType: "application/json",
+      },
+      "GET /api/message-usdm": {
+        accepts: {
+          scheme: "exact",
+          network: "cardano:preprod",
+          payTo: SELLER_ADDRESS,
+          // Same address-to-address transfer as the first route — the only
+          // difference is the asset. x402 names a native token as
+          // `policyId.assetNameHex`; tUSDM has 6 decimals, so 100000 = 0.10.
+          // The wallet must actually hold this token, and its output carries
+          // min-ADA alongside the token (the client's autoMinUtxo handles that).
+          price: { amount: "100000", asset: USDM_ASSET },
+          maxTimeoutSeconds: 600,
+          extra: { assetTransferMethod: "default" },
+        },
+        description: "A message you can only read after paying 0.10 tUSDM",
         mimeType: "application/json",
       },
   };

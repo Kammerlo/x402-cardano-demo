@@ -24,11 +24,14 @@ export type FlowStep =
  * different `accepted.extra.assetTransferMethod` (see the server route
  * definitions), which the signer branches on to build a plain output vs. a
  * masumi escrow-lock datum. */
-export type PaymentMethod = "default" | "masumi";
+export type PaymentMethod = "default" | "masumi" | "usdm";
 
 const METHOD_PATHS: Record<PaymentMethod, string> = {
   default: "/api/message",
   masumi: "/api/message-masumi",
+  // Same `default` assetTransferMethod as the first route — the only
+  // difference is the asset: a native token (tUSDM) instead of lovelace.
+  usdm: "/api/message-usdm",
 };
 
 export async function runPaymentFlow(

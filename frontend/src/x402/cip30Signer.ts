@@ -9,7 +9,7 @@
  * Mirrors the reference signer recipe in @x402/cardano (signer.ts):
  *   nonce  = first wallet UTxO, forced as an input via collectFrom
  *            (the facilitator's replay protection - verification rule 5)
- *   output = payTo receives the requested lovelace
+ *   output = payTo receives the requested asset (lovelace or a native token)
  *   TTL    = now + maxTimeoutSeconds (verification rule 6)
  */
 import {
@@ -21,10 +21,31 @@ import {
 } from "@evolution-sdk/evolution";
 import {
   buildMasumiLockInline,
+  LOVELACE_ASSET,
+  parseAssetUnit,
   type CardanoExtraMasumi,
   type ClientCardanoSigner,
   type ClientCardanoSignInput,
 } from "@x402/cardano";
+
+/**
+ * Builds the output value for the requested asset.
+ *
+ * x402 names an asset either as the literal `lovelace` or as
+ * `policyId.assetNameHex` (e.g. tUSDM). Lovelace sits in the output's coin
+ * field; a native token goes in the multi-asset map and still needs coin
+ * alongside it, which `autoMinUtxo` raises to the protocol minimum at build
+ * time (a token output costs roughly 1.2-1.5 ADA of min-UTxO on top).
+ *
+ * @param asset  - `lovelace` or `policyId.assetNameHex`.
+ * @param amount - Amount in the asset's smallest unit.
+ * @returns The Evolution assets value for the payment output.
+ */
+function buildOutputAssets(asset: string, amount: bigint): Assets.Assets {
+  if (asset.toLowerCase() === LOVELACE_ASSET) return Assets.fromLovelace(amount);
+  const { policyId, assetNameHex } = parseAssetUnit(asset);
+  return Assets.addByHex(Assets.zero, policyId, assetNameHex, amount);
+}
 
 export interface Cip30WalletApi {
   // Minimal CIP-30 surface we rely on (window.cardano.<wallet>.enable() result).
@@ -127,9 +148,7 @@ export async function createCip30Signer(
     getAddress: () => address,
 
     async buildAndSignPaymentTransaction(input: ClientCardanoSignInput) {
-      if (input.asset.toLowerCase() !== "lovelace") {
-        throw new Error(`This demo signer only pays lovelace, got: ${input.asset}`);
-      }
+      const isLovelace = input.asset.toLowerCase() === LOVELACE_ASSET;
 
       const utxos = await client.getWalletUtxos();
       if (utxos.length === 0) throw new Error("Wallet has no UTxOs — fund it at the preprod faucet");
@@ -161,6 +180,12 @@ export async function createCip30Signer(
       // client.address() (usually the same wallet address, but the nonce UTxO
       // is what the facilitator checks).
       const method = String(input.extra?.assetTransferMethod ?? "default");
+      if (method === "masumi" && !isLovelace) {
+        // Masumi v2 escrows lock ADA. A token lock needs the escrow output's
+        // min-ADA derived from the datum size (see masumiTokenLockLovelace in
+        // @x402/cardano's reference signer) — out of scope for this demo.
+        throw new Error(`The masumi escrow-lock demo pays lovelace, not ${input.asset}`);
+      }
       const datum =
         method === "masumi"
           ? buildMasumiLockInline(
@@ -168,11 +193,12 @@ export async function createCip30Signer(
               Address.toBech32(nonceUtxo.address),
             )
           : undefined;
-      // A datum-bearing output needs extra min-ADA above the plain-lovelace
-      // minimum, so autoMinUtxo only applies to the masumi (datum) path — the
-      // "default" address-to-address path builds exactly as it did before
-      // this extension.
-      const autoMinUtxo = method === "masumi";
+      // Both a datum-bearing output and a native-token output need more coin
+      // than a plain lovelace payment: the datum enlarges the output, and a
+      // token output must still carry min-ADA alongside the token. autoMinUtxo
+      // raises the coin to the protocol minimum for those two cases, leaving a
+      // plain lovelace payment to build exactly as before.
+      const autoMinUtxo = method === "masumi" || !isLovelace;
 
       // Masumi: pin the validity upper bound to pay_by_time (see .setValidity
       // below). Masumi invalidates a lock that lands after that deadline, so
@@ -188,7 +214,7 @@ export async function createCip30Signer(
         .collectFrom({ inputs: [nonceUtxo] })
         .payToAddress({
           address: Address.fromBech32(input.payTo),
-          assets: Assets.fromLovelace(BigInt(input.amount)),
+          assets: buildOutputAssets(input.asset, BigInt(input.amount)),
           ...(datum ? { datum } : {}),
         })
         // Wall-clock ms; the SDK converts it to the TTL slot. For masumi the
