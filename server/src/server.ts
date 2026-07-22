@@ -75,24 +75,53 @@ const MASUMI_AGENT_IDENTIFIER =
 const MASUMI_PAY_BY_WINDOW_MS = 15 * 60_000;
 
 /**
- * Builds the four Masumi lock deadlines relative to now.
+ * Regenerate the deadlines once fewer than this many ms remain on the current
+ * `payByTime`. See {@link masumiDeadlines} for why they cannot simply be
+ * recomputed on every request.
+ */
+const MASUMI_DEADLINE_REFRESH_MS = 5 * 60_000;
+
+let deadlineCache: Record<string, string> | null = null;
+
+/**
+ * The four Masumi lock deadlines, **stable across a payment round-trip**.
  *
- * Real deadlines come from the Masumi payment request the seller creates **per
- * incoming request** (`POST /payment`), so they must be generated per 402 — a
- * value fixed at startup silently expires while the server keeps running, and
- * every later lock is then rejected on the deadline rule. Ordering is
- * `payByTime <= submitResultTime <= unlockTime <= externalDisputeUnlockTime`.
+ * Two requirements pull against each other here:
+ *
+ * 1. They must not be frozen at startup. Real deadlines come from the Masumi
+ *    payment request the seller creates per job, and a boot-time value silently
+ *    expires while the server keeps running — every later lock then fails the
+ *    facilitator's deadline rule.
+ * 2. They must be **identical** in the 402 and in the client's retry. The
+ *    resource server matches the client's echoed `accepted` against its own
+ *    route config (`objectContainsSubset` over `extra`), so if `payByTime`
+ *    changed between the two requests nothing matches and the middleware
+ *    answers 402 *without ever calling the facilitator* — a silent rejection
+ *    with no reason logged anywhere.
+ *
+ * Recomputing per request satisfies (1) and breaks (2). So the values are
+ * cached and refreshed only once they near expiry: stable for minutes at a
+ * time — far longer than any 402 -> sign -> retry round-trip — while never
+ * going stale. A production server sidesteps this entirely: the client returns
+ * its `blockchainIdentifier` and the server looks the purchase up instead of
+ * regenerating anything.
+ *
+ * Ordering is `payByTime <= submitResultTime <= unlockTime <= externalDisputeUnlockTime`.
  *
  * @returns The four POSIX-millisecond bounds as decimal strings.
  */
 function masumiDeadlines(): Record<string, string> {
-  const payByTime = Date.now() + MASUMI_PAY_BY_WINDOW_MS;
-  return {
-    payByTime: String(payByTime),
-    submitResultTime: String(payByTime + 10 * 60_000),
-    unlockTime: String(payByTime + 20 * 60_000),
-    externalDisputeUnlockTime: String(payByTime + 30 * 60_000),
-  };
+  const remaining = deadlineCache ? Number(deadlineCache.payByTime) - Date.now() : 0;
+  if (!deadlineCache || remaining < MASUMI_DEADLINE_REFRESH_MS) {
+    const payByTime = Date.now() + MASUMI_PAY_BY_WINDOW_MS;
+    deadlineCache = {
+      payByTime: String(payByTime),
+      submitResultTime: String(payByTime + 10 * 60_000),
+      unlockTime: String(payByTime + 20 * 60_000),
+      externalDisputeUnlockTime: String(payByTime + 30 * 60_000),
+    };
+  }
+  return deadlineCache;
 }
 
 const app = express();
@@ -202,7 +231,8 @@ function buildRoutes(): RoutesConfig {
             sellerNonce: "8877665544332211", // DUMMY: hex
             agentIdentifier: MASUMI_AGENT_IDENTIFIER, // DUMMY value, real shape (policy id + asset name)
             collateralReturnLovelace: "0", // DUMMY: optional, 0
-            // Generated per request, as a real payment request would be.
+            // Refreshed as they near expiry rather than pinned at boot; see
+            // masumiDeadlines() for why they cannot change per request.
             ...masumiDeadlines(),
           },
         },
@@ -212,10 +242,24 @@ function buildRoutes(): RoutesConfig {
   };
 }
 
-// Construct the middleware per request so buildRoutes() re-runs and the masumi
-// deadlines are relative to *this* request. (Building it once would be cheaper,
-// but would pin payByTime to server start.)
-app.use((req, res, next) => paymentMiddleware(buildRoutes(), resourceServer)(req, res, next));
+// The middleware is rebuilt only when the masumi deadlines refresh, not per
+// request: paymentMiddleware() takes a static routes object and calls
+// initialize() (a GET /supported round-trip) once per construction, so building
+// one per request would re-fetch that every time. Memoizing on the deadline
+// object also keeps the advertised requirements byte-identical across a
+// payment's 402 and retry, which is what makes them match.
+let cachedMiddleware: {
+  deadlines: Record<string, string>;
+  handler: ReturnType<typeof paymentMiddleware>;
+} | null = null;
+
+app.use((req, res, next) => {
+  const deadlines = masumiDeadlines();
+  if (!cachedMiddleware || cachedMiddleware.deadlines !== deadlines) {
+    cachedMiddleware = { deadlines, handler: paymentMiddleware(buildRoutes(), resourceServer) };
+  }
+  return cachedMiddleware.handler(req, res, next);
+});
 
 // Only reached AFTER the facilitator verified the payment; the middleware
 // settles it after we return (status < 400).
