@@ -1,38 +1,39 @@
 # x402 on Cardano — a payment-per-request demo
 
-An end-to-end demo of the [x402 payment protocol](https://github.com/coinbase/x402) (`exact` scheme, v2) settling real ADA on **Cardano preprod**. A browser client and a resource server walk one HTTP request through the full 402 → pay → retry loop, showing every protocol artifact on screen as it happens.
+An end-to-end demo of the [x402 payment protocol](https://github.com/coinbase/x402) (`exact` scheme, v2) settling real ADA on **Cardano preprod**. A browser client, a resource server, and a facilitator walk one HTTP request through the full 402 → pay → retry loop, showing every protocol artifact on screen as it happens.
 
-**This repo ships two of the three x402 roles.** The **facilitator** is external — you must run one and point the server at it.
+All three x402 roles run locally: the browser **client**, the resource **server**, and a deliberately minimal **facilitator**.
 
-## You need an external facilitator
+## The facilitator
 
-The resource server delegates payment verification and on-chain settlement to a facilitator. `FACILITATOR_URL` is **required**; point it at an x402 facilitator whose `GET /supported` advertises:
+The resource server can't validate a Cardano transaction itself, so it delegates to a facilitator: `/verify` (does this signed tx really pay the seller, un-replayed?) and `/settle` (submit it, wait for a block).
 
-```json
-{ "x402Version": 2, "scheme": "exact", "network": "cardano:preprod" }
-```
+`facilitator/` is the smallest spec-compatible implementation — **~130 lines, no protocol logic of its own**. `@x402/cardano` already ships the reference facilitator-role scheme (all seven verification rules, the nonce/replay guard, the duplicate-settlement cache, the masumi checks); this is just the HTTP surface the spec defines wired to it. Compatibility comes from reusing the reference implementation rather than re-deriving it.
 
-The server checks this at startup and refuses to serve its paid routes otherwise, so a wrong or unreachable URL fails fast at boot instead of mid-payment.
+It **holds no funds and signs nothing** — the client's wallet pays the fee and signs everything, so the facilitator needs only a Blockfrost project id to read chain state and broadcast (no mnemonic, no keys).
 
-**Reference implementation: [Kammerlo/cardano-x402-facilitator](https://github.com/Kammerlo/cardano-x402-facilitator)** — a Cardano facilitator built for this demo. Follow its README to run it, then set `FACILITATOR_URL` to its address.
+**Swapping it out** is one env var: `FACILITATOR_URL` accepts any facilitator whose `GET /supported` advertises `{ "x402Version": 2, "scheme": "exact", "network": "cardano:preprod" }`. The server checks this at startup and refuses to serve paid routes otherwise, so a wrong URL fails fast at boot. A fuller alternative is [Kammerlo/cardano-x402-facilitator](https://github.com/Kammerlo/cardano-x402-facilitator).
 
-> There is no public *hosted* x402 facilitator that supports Cardano. The x402 library's built-in default (`https://x402.org/facilitator`) serves EVM/SVM only — pointing at it fails the `/supported` check. The TypeScript reference facilitator in the x402 monorepo (`../x402/e2e/facilitators/typescript`) also speaks Cardano if you'd rather run that one.
+> Note there is no public *hosted* x402 facilitator that supports Cardano — the library's built-in default (`https://x402.org/facilitator`) serves EVM/SVM only.
 
 ## Quick start
 
 ```bash
-./setup.sh                        # 1. build the sibling ../x402/typescript packages (once)
-                                  # 2. start your facilitator (see above), then:
-cd server   && cp .env.example .env && npm install && npm run dev    # :4021
-cd frontend && cp .env.example .env && npm install && npm run dev    # :5173
+./setup.sh                          # build the sibling ../x402/typescript packages (once)
+
+# then one terminal each, in this order:
+cd facilitator && cp .env.example .env && npm install && npm run dev   # :4022
+cd server      && cp .env.example .env && npm install && npm run dev   # :4021
+cd frontend    && cp .env.example .env && npm install && npm run dev   # :5173
 ```
 
-Fill in the two `.env` files first:
+Fill in the three `.env` files first:
 
 | File | Set |
 |---|---|
-| `server/.env` | `SERVER_CARDANO_ADDRESS` (a preprod address you control — receives the payments) and `FACILITATOR_URL` |
-| `frontend/.env` | `VITE_BLOCKFROST_PROJECT_ID` (free at [blockfrost.io](https://blockfrost.io) — the browser uses it to select wallet UTxOs) |
+| `facilitator/.env` | `BLOCKFROST_PROJECT_ID` (free at [blockfrost.io](https://blockfrost.io)) |
+| `server/.env` | `SERVER_CARDANO_ADDRESS` (a preprod address you control — receives the payments). `FACILITATOR_URL` already points at the local facilitator. |
+| `frontend/.env` | `VITE_BLOCKFROST_PROJECT_ID` (the browser uses it to select wallet UTxOs) |
 
 Then open **http://localhost:5173**, connect a **preprod** CIP-30 wallet (Eternl/Lace) funded from the [testnet faucet](https://docs.cardano.org/cardano-testnets/tools/faucet), and run the flow.
 
@@ -48,7 +49,7 @@ The client requests a resource; the server answers `402` with a `PAYMENT-REQUIRE
 sequenceDiagram
     participant C as Client (frontend)
     participant S as Resource server
-    participant F as Facilitator (external)
+    participant F as Facilitator
     participant X as Cardano preprod
 
     C->>S: GET /api/message
@@ -73,14 +74,15 @@ The facilitator never holds funds and never signs — the client's wallet pays t
 |---|---|---|
 | `frontend/` | 5173 | Client — CIP-30 wallet signing via Evolution SDK, step-by-step protocol walkthrough UI |
 | `server/` | 4021 | Resource server — names the price, delegates verify/settle, serves the resource once paid |
+| `facilitator/` | 4022 | Facilitator — `/verify`, `/settle`, `/supported` over `@x402/cardano`'s reference scheme |
 
-Both consume the sibling `../x402/typescript` workspace via npm `file:` links (`@x402/core`, `@x402/cardano`, `@x402/express`), which is why `./setup.sh` must run before `npm install`. `@x402/cardano` isn't on npm, so there's no registry alternative. (If npm ever rejects a transitive `workspace:` spec, fall back to `pnpm --filter <pkg> pack` in `../x402/typescript` and point the dependency at the `.tgz`.)
+All three consume the sibling `../x402/typescript` workspace via npm `file:` links (`@x402/core`, `@x402/cardano`, `@x402/express`), which is why `./setup.sh` must run before `npm install`. `@x402/cardano` isn't on npm, so there's no registry alternative. (If npm ever rejects a transitive `workspace:` spec, fall back to `pnpm --filter <pkg> pack` in `../x402/typescript` and point the dependency at the `.tgz`.)
 
 ## Two payment methods
 
 `GET /api/message` — **2 tADA, address-to-address** (`assetTransferMethod: "default"`): a plain output to the seller. This is the default path.
 
-`GET /api/message-masumi` — **5 tADA, escrow lock** (`assetTransferMethod: "masumi"`): modeled on [Masumi](https://www.masumi.network/)'s agent-payment escrow. Instead of paying the seller, the wallet locks the ADA into an escrow output carrying a **19-field inline Plutus datum** (buyer/seller, reference key + signature, nonces, agent id, four lifecycle timestamps). x402 covers only the **lock**; releasing it later is out of scope. Pick it in the UI's Step B before running the flow. Your facilitator must implement the masumi rules for this route to verify.
+`GET /api/message-masumi` — **5 tADA, escrow lock** (`assetTransferMethod: "masumi"`): modeled on [Masumi](https://www.masumi.network/)'s agent-payment escrow. Instead of paying the seller, the wallet locks the ADA into an escrow output carrying a **19-field inline Plutus datum** (buyer/seller, reference key + signature, nonces, agent id, four lifecycle timestamps). x402 covers only the **lock**; releasing it later is out of scope. Pick it in the UI's Step B before running the flow. The included facilitator verifies these locks (the masumi rules come with `@x402/cardano`'s scheme); a substitute facilitator must implement them too.
 
 Two caveats on the masumi route, both deliberate for a demo:
 
@@ -101,4 +103,4 @@ Two caveats on the masumi route, both deliberate for a demo:
 
 *`server` and `frontend` both pass `npm run typecheck`; `frontend` also passes `npm run build`. The full live payment (wallet → real preprod tADA → settled on Cardanoscan) needs your own facilitator, Blockfrost id, and a funded wallet.*
 
-*A Java/Spring Boot facilitator (yaci-store + cardano-client-lib, 85 tests) previously lived here under `facilitator/`; it was moved out in favour of pointing at an external one, and remains in this branch's git history — `git log -- facilitator/`.*
+*`facilitator/` previously held a from-scratch Java/Spring Boot implementation (yaci-store + cardano-client-lib, 85 tests) that re-derived the verification rules by hand. It was replaced by the current thin wrapper around `@x402/cardano`'s reference scheme — same protocol surface, a fraction of the code and none of the JVM toolchain. The Java version remains in this branch's git history: `git log -- facilitator/`.*

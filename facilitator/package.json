@@ -1,0 +1,23 @@
+{
+  "name": "x402-cardano-demo-facilitator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/facilitator.ts",
+    "start": "tsx src/facilitator.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@x402/cardano": "file:../../x402/typescript/packages/mechanisms/cardano",
+    "@x402/core": "file:../../x402/typescript/packages/core",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
