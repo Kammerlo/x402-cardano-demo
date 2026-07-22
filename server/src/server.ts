@@ -306,4 +306,32 @@ app.get("/api/message-masumi", (_req, res) => {
   });
 });
 
+// Only reached AFTER the facilitator verified the tUSDM payment. Same
+// address-to-address transfer as /api/message — only the asset differs.
+app.get("/api/message-usdm", (_req, res) => {
+  res.json({
+    message: "Hello from x402 on Cardano! This response was paid for with 0.10 tUSDM, a native token.",
+    paidAt: new Date().toISOString(),
+  });
+});
+
+// Every route in buildRoutes() needs a handler here as well: paymentMiddleware
+// only gates a route, it does not serve it. A priced route with no handler
+// answers 402 while unpaid (the middleware short-circuits) and then 404s the
+// moment a payment succeeds — with settlement cancelled, since the middleware
+// aborts /settle when the handler responds >= 400.
+const pricedRoutes = Object.keys(buildRoutes()).map((r) => r.replace(/^GET\s+/, ""));
+const servedRoutes = new Set(
+  (app._router?.stack ?? [])
+    .filter((l: { route?: { path?: string } }) => typeof l.route?.path === "string")
+    .map((l: { route: { path: string } }) => l.route.path),
+);
+const unserved = pricedRoutes.filter((p) => !servedRoutes.has(p));
+if (unserved.length > 0) {
+  throw new Error(
+    `Priced route(s) with no request handler: ${unserved.join(", ")}. ` +
+      "Add an app.get(...) for each, or paying for one returns 404.",
+  );
+}
+
 app.listen(PORT, () => console.log(`Resource server listening on :${PORT} (facilitator: ${FACILITATOR_URL})`));
