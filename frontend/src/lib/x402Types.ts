@@ -39,9 +39,10 @@ export function pickCardanoRequirements(required: PaymentRequired): PaymentRequi
   return required.accepts.find((a) => a.scheme === "exact" && a.network === "cardano:preprod");
 }
 
-/** Reads the Cardano facilitator's `extra: { status }` convention (see
- * ExactCardanoFacilitatorScheme.java: "confirmed" once seen in a block, "mempool"
- * if the confirmation-timeout window elapsed but `acceptMempool` let it through). */
+/** Reads the Cardano facilitator's `extra: { status }` convention: "confirmed"
+ * once the tx is seen in a block, "mempool" if the confirmation-timeout window
+ * elapsed but `acceptMempool` let it through (see `ExactCardanoScheme` in
+ * @x402/cardano/exact/facilitator). */
 export function settlementStatus(settle: SettleResponse | null | undefined): "confirmed" | "mempool" | "unknown" {
   const status = settle?.extra?.status;
   if (status === "confirmed" || status === "mempool") return status;

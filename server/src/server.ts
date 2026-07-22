@@ -27,6 +27,7 @@ import {
 } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
+import { MASUMI_PAYMENT_SOURCE_TYPE } from "@x402/cardano";
 import { LoggingFacilitatorClient } from "./facilitatorLogging.js";
 
 const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that receives the 2 tADA
@@ -223,7 +224,7 @@ function buildRoutes(): RoutesConfig {
           // buildMasumiLockInline() from @x402/cardano).
           extra: {
             assetTransferMethod: "masumi", // real, required
-            paymentType: "Web3CardanoV2", // real constant, required by spec; advisory only (facilitator does not check it)
+            paymentType: MASUMI_PAYMENT_SOURCE_TYPE, // real constant from the library; advisory only (facilitator does not check it)
             contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
             sellerAddress: SELLER_ADDRESS, // real — the seller's own preprod address; MUST be a public-key/non-script address
             referenceKey: "a1b2c3d4", // DUMMY: hex
