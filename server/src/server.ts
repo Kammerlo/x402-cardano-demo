@@ -27,7 +27,13 @@ import {
 } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { ExactCardanoScheme } from "@x402/cardano/exact/server";
-import { MASUMI_PAYMENT_SOURCE_TYPE, USDM_PREPROD_ASSET } from "@x402/cardano";
+import {
+  issueMasumiRequirements,
+  masumiEscrowAddress,
+  toMasumiSellerSigner,
+  USDM_PREPROD_ASSET,
+  type CardanoSubmissionPolicy,
+} from "@x402/cardano";
 import { LoggingFacilitatorClient } from "./facilitatorLogging.js";
 
 const PAY_TO = process.env.SERVER_CARDANO_ADDRESS; // preprod address that receives the 2 tADA
@@ -49,15 +55,28 @@ if (!FACILITATOR_URL) {
   );
 }
 
-// DUMMY: escrow address. The `masumi` assetTransferMethod locks funds into an
-// escrow contract instead of paying the seller directly. A real deployment
-// would point this at the actual Masumi `vested_pay` script address for the
-// target network (obtained from the Masumi Payment Service). Here we default
-// it to our own SERVER_CARDANO_ADDRESS — a plain, RECOVERABLE preprod address
-// the operator controls — so the demo can both lock and (manually) reclaim
-// the funds. A successful masumi settle therefore means the funds are LOCKED
-// in this escrow, NOT delivered to the seller.
-const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? SELLER_ADDRESS;
+// The escrow address is NOT a free choice any more. Under the current spec the
+// facilitator applies the deployment parameters to the canonical `vested_pay`
+// blueprint, derives the script address itself, and requires `payTo` to equal
+// it — a look-alike escrow with different admins is a different trust domain,
+// so a stand-in address is rejected outright.
+//
+// ⚠️  This means the masumi routes lock into the REAL preprod `vested_pay`
+// script. Those funds are governed by the Masumi escrow lifecycle (result
+// submission, refund, dispute) and are NOT recoverable by simply spending the
+// UTxO. Keep the amounts small.
+const MASUMI_ESCROW_ADDRESS = masumiEscrowAddress("cardano:preprod");
+
+// The seller signs the Masumi terms (CIP-8 over `termsDigest`), and the escrow
+// pays this address, so a real deployment MUST supply its selling wallet. The
+// well-known test phrase only keeps the demo self-contained; the key needs no
+// funds — it only authorizes the terms.
+const MASUMI_SELLER = toMasumiSellerSigner({
+  mnemonic:
+    process.env.MASUMI_SELLER_MNEMONIC ??
+    "test test test test test test test test test test test junk",
+  network: "cardano:preprod",
+});
 
 // The native token the tUSDM route charges in, as x402 names assets:
 // `policyId.assetNameHex`. Defaults to @x402/cardano's preprod tUSDM constant
@@ -67,70 +86,145 @@ const MASUMI_ESCROW_ADDRESS = process.env.MASUMI_ESCROW_ADDRESS ?? SELLER_ADDRES
 // set USDM_ASSET to whichever one your wallet actually holds.
 const USDM_ASSET = process.env.USDM_ASSET ?? USDM_PREPROD_ASSET;
 
-// DUMMY: agent identifier. Masumi's registry defines this as "policy ID + asset
-// name" of the on-chain agent NFT, validated as 57-250 characters
-// (`agentIdentifier` in masumi-payment-service's registry schema), so it is a
-// 56-hex-character policy id concatenated with the asset name in hex — no
-// separator. This one is fabricated but structurally valid; a real deployment
-// gets it from the Masumi Registry once the agent is minted.
-const MASUMI_AGENT_IDENTIFIER =
-  "3f2c9a1b7e4d6058c1a9b3f7d2e5648a0c7b1f93e6d4a28c5b0f7e31" + // policy id (56 hex)
-  "4d6173756d6944656d6f4167656e74303031"; // asset name: "MasumiDemoAgent001"
+// No `agentIdentifier` is declared: a non-empty one is a Masumi V2 REGISTRY
+// CLAIM, and the spec requires it to be validated independently on-chain
+// (asset, seller authorization, metadata, endpoint, price). @x402/cardano
+// refuses a claim it cannot validate, so a fabricated identifier would now be
+// rejected rather than waved through. Omitting it means "unregistered seller",
+// which is exactly what this demo is.
 
 // How long the client has to get its lock on-chain. The wallet anchors the
-// transaction's validity upper bound to `payByTime`, and the facilitator
-// rejects a lock whose TTL could settle after it, so this doubles as the
-// transaction's lifetime and must exceed the wallet's signing + submit time.
-const MASUMI_PAY_BY_WINDOW_MS = 15 * 60_000;
+// transaction's validity upper bound to `payByTime`, and rule 7 rejects a TTL
+// further ahead than `maxTimeoutSeconds`, so this must not exceed it.
+const MAX_TIMEOUT_SECONDS = 600;
+const MASUMI_PAY_BY_WINDOW_MS = MAX_TIMEOUT_SECONDS * 1000;
 
 /**
- * Regenerate the deadlines once fewer than this many ms remain on the current
- * `payByTime`. See {@link masumiDeadlines} for why they cannot simply be
- * recomputed on every request.
+ * Demo knobs the frontend can flip at runtime so every spec feature is
+ * reachable from the UI. These are ordinary `PaymentRequirements.extra` fields
+ * — the demo just makes them adjustable instead of hard-coding them.
  */
-const MASUMI_DEADLINE_REFRESH_MS = 5 * 60_000;
+interface DemoConfig {
+  /** Who broadcasts: `server` (default), `client`, or `either` (client picks). */
+  submissionPolicy: CardanoSubmissionPolicy;
+  /**
+   * Minimum L1 evidence before the resource is released: `-1` authenticated
+   * mempool acceptance, `0` canonical block inclusion, `1..20` that many newer
+   * blocks. Defaults to the spec default of 1.
+   */
+  l1Confirmations: number;
+}
 
-let deadlineCache: Record<string, string> | null = null;
+const demoConfig: DemoConfig = {
+  submissionPolicy: (process.env.SUBMISSION_POLICY as CardanoSubmissionPolicy) ?? "either",
+  l1Confirmations: Number(process.env.L1_CONFIRMATIONS ?? 1),
+};
 
 /**
- * The four Masumi lock deadlines, **stable across a payment round-trip**.
+ * The shared policy block every route advertises. Both fields live at the top
+ * level of `extra` for all three assetTransferMethods, and are bound by exact
+ * `accepted` matching — they are not part of the Masumi `termsDigest`.
  *
- * Two requirements pull against each other here:
+ * @returns The `submissionPolicy` / `confirmationPolicy` pair.
+ */
+function policyExtra(): Record<string, unknown> {
+  return {
+    submissionPolicy: demoConfig.submissionPolicy,
+    confirmationPolicy: { l1Confirmations: demoConfig.l1Confirmations },
+  };
+}
+
+/**
+ * Reissue the Masumi requirements once fewer than this many ms remain on the
+ * current `payByTime`. See {@link masumiRequirementsFor} for why they cannot
+ * simply be regenerated on every request.
+ */
+const MASUMI_REFRESH_MS = 4 * 60_000;
+
+/** One issued 402 per masumi route, reused until it nears expiry. */
+interface IssuedMasumi {
+  payByTime: number;
+  policy: string;
+  requirements: Awaited<ReturnType<typeof issueMasumiRequirements>>;
+}
+const masumiCache = new Map<string, IssuedMasumi>();
+
+/**
+ * A Masumi `PaymentRequirements`, **stable across a payment round-trip**.
  *
- * 1. They must not be frozen at startup. Real deadlines come from the Masumi
- *    payment request the seller creates per job, and a boot-time value silently
- *    expires while the server keeps running — every later lock then fails the
- *    facilitator's deadline rule.
+ * Two requirements pull against each other:
+ *
+ * 1. They must not be frozen at startup. `payByTime` is a real deadline and a
+ *    boot-time value silently expires while the server keeps running; every
+ *    later lock then fails the facilitator's deadline rule.
  * 2. They must be **identical** in the 402 and in the client's retry. The
  *    resource server matches the client's echoed `accepted` against its own
- *    route config (`objectContainsSubset` over `extra`), so if `payByTime`
- *    changed between the two requests nothing matches and the middleware
- *    answers 402 *without ever calling the facilitator* — a silent rejection
- *    with no reason logged anywhere.
+ *    route config, so a regenerated `sellerNonce` or deadline means nothing
+ *    matches and the middleware answers 402 *without ever calling the
+ *    facilitator* — a silent rejection with no reason logged anywhere. The spec
+ *    says the same thing normatively: the issuer MUST store the complete
+ *    requirements object and reuse it on the paid retry, and MUST NOT
+ *    regenerate the nonce, deadlines, commitment or policies.
  *
- * Recomputing per request satisfies (1) and breaks (2). So the values are
- * cached and refreshed only once they near expiry: stable for minutes at a
- * time — far longer than any 402 -> sign -> retry round-trip — while never
- * going stale. A production server sidesteps this entirely: the client returns
- * its `blockchainIdentifier` and the server looks the purchase up instead of
- * regenerating anything.
+ * Reissuing per request satisfies (1) and breaks (2). So each route's object is
+ * cached and reissued only as it nears expiry — stable for minutes at a time,
+ * far longer than any 402 -> sign -> retry round-trip. A production issuer keys
+ * the stored object by the buyer's request instead of caching per route.
  *
- * Ordering is `payByTime <= submitResultTime <= unlockTime <= externalDisputeUnlockTime`.
- *
- * @returns The four POSIX-millisecond bounds as decimal strings.
+ * @param routeKey - Cache key identifying the route.
+ * @param asset - The asset unit the route charges in.
+ * @param amount - The amount in the asset's smallest unit.
+ * @returns The issued requirements.
  */
-function masumiDeadlines(): Record<string, string> {
-  const remaining = deadlineCache ? Number(deadlineCache.payByTime) - Date.now() : 0;
-  if (!deadlineCache || remaining < MASUMI_DEADLINE_REFRESH_MS) {
-    const payByTime = Date.now() + MASUMI_PAY_BY_WINDOW_MS;
-    deadlineCache = {
-      payByTime: String(payByTime),
-      submitResultTime: String(payByTime + 10 * 60_000),
-      unlockTime: String(payByTime + 20 * 60_000),
-      externalDisputeUnlockTime: String(payByTime + 30 * 60_000),
-    };
+async function masumiRequirementsFor(
+  routeKey: string,
+  asset: string,
+  amount: string,
+): Promise<IssuedMasumi["requirements"]> {
+  const policy = JSON.stringify(policyExtra());
+  const cached = masumiCache.get(routeKey);
+  if (
+    cached &&
+    cached.policy === policy &&
+    cached.payByTime - Date.now() > MASUMI_REFRESH_MS
+  ) {
+    return cached.requirements;
   }
-  return deadlineCache;
+
+  const payByTime = Date.now() + MASUMI_PAY_BY_WINDOW_MS;
+  // Deadlines must clear the spec's minimum intervals:
+  //   pay_by + 5min <= submit_result, +15min <= unlock, +15min <= dispute.
+  const requirements = await issueMasumiRequirements({
+    network: "cardano:preprod",
+    asset,
+    amount,
+    maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    sellerAddress: MASUMI_SELLER.sellerAddress,
+    signTerms: MASUMI_SELLER.signTerms,
+    // What the escrow's `input_hash` binds the funds to. A real issuer commits
+    // to the buyer's actual request (parameters, body); this demo answers an
+    // unauthenticated GET, so it commits to the route it is pricing.
+    commitment: [
+      {
+        name: "parameters",
+        canonicalization: "jcs",
+        mediaType: "application/json",
+        content: { route: routeKey, asset, amount },
+      },
+    ],
+    payByTime: String(payByTime),
+    submitResultTime: String(payByTime + 5 * 60_000),
+    unlockTime: String(payByTime + 20 * 60_000),
+    externalDisputeUnlockTime: String(payByTime + 35 * 60_000),
+    // L1 only — this demo drives no Hydra head, and the facilitator refuses a
+    // Hydra payment it cannot authenticate against a verified head.
+    settlementPolicy: "l1",
+    submissionPolicy: demoConfig.submissionPolicy,
+    confirmationPolicy: { l1Confirmations: demoConfig.l1Confirmations },
+  });
+
+  masumiCache.set(routeKey, { payByTime, policy, requirements });
+  return requirements;
 }
 
 const app = express();
@@ -182,135 +276,152 @@ app.use((req, res, next) => {
 });
 
 /**
- * The seller-side half of a Masumi lock datum, shared by both masumi routes
- * (ADA and native-token). Built per request so the deadlines stay fresh — see
- * masumiDeadlines(). The facilitator compares the on-chain datum against these
- * exact values, so the wallet must copy them verbatim.
+ * Builds the route payment config.
  *
- * @returns The masumi `extra` block for a route's `accepts`.
+ * The masumi routes carry a fully issued `PaymentRequirements` — request
+ * commitment, seller-signed `terms`, CIP-8 authorization over `termsDigest`
+ * and the compatibility identifier — because none of that can be hand-written
+ * any more. `payTo` comes from the issuer too: it is DERIVED from the
+ * deployment parameters, and the facilitator re-derives it and rejects a
+ * mismatch.
+ *
+ * @returns The routes config for `paymentMiddleware`.
  */
-function masumiExtra(): Record<string, string> {
+async function buildRoutes(): Promise<RoutesConfig> {
+  const masumiAda = await masumiRequirementsFor("masumi-ada", "lovelace", "5000000");
+  const masumiToken = await masumiRequirementsFor("masumi-usdm", USDM_ASSET, "250000");
+
   return {
-    assetTransferMethod: "masumi", // real, required
-    paymentType: MASUMI_PAYMENT_SOURCE_TYPE, // real constant from the library; advisory only (facilitator does not check it)
-    contractAddress: MASUMI_ESCROW_ADDRESS, // must equal payTo
-    sellerAddress: SELLER_ADDRESS, // real — the seller's own preprod address; MUST be a public-key/non-script address
-    referenceKey: "a1b2c3d4", // DUMMY: hex
-    referenceSignature: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // DUMMY: hex, 32 bytes (>=16 required)
-    sellerNonce: "8877665544332211", // DUMMY: hex
-    agentIdentifier: MASUMI_AGENT_IDENTIFIER, // DUMMY value, real shape (policy id + asset name)
-    collateralReturnLovelace: "0", // DUMMY: optional, 0
-    ...masumiDeadlines(),
+    "GET /api/message": {
+      accepts: {
+        scheme: "exact",
+        network: "cardano:preprod",
+        payTo: SELLER_ADDRESS,
+        // 2 tADA in lovelace. Comfortably above the ~1 ADA min-UTxO the
+        // facilitator enforces (verification rule 8).
+        price: { amount: "2000000", asset: "lovelace" },
+        // Cardano blocks are slow vs EVM L2s; give the tx 10 minutes of TTL.
+        maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+        extra: { assetTransferMethod: "default", ...policyExtra() },
+      },
+      description: "A message you can only read after paying 2 tADA",
+      mimeType: "application/json",
+    },
+    "GET /api/message-masumi": {
+      accepts: {
+        scheme: "exact",
+        network: "cardano:preprod",
+        // The DERIVED vested_pay address — see MASUMI_ESCROW_ADDRESS.
+        payTo: masumiAda.payTo,
+        // 5 tADA in lovelace. The escrow output also carries an inline datum,
+        // which raises min-UTxO above a plain transfer; 5 tADA stays clear of
+        // that floor so the client needs no collateral top-up.
+        price: { amount: masumiAda.amount, asset: masumiAda.asset },
+        maxTimeoutSeconds: masumiAda.maxTimeoutSeconds,
+        extra: masumiAda.extra,
+      },
+      description: "A message unlocked by locking 5 tADA into the Masumi escrow",
+      mimeType: "application/json",
+    },
+    "GET /api/message-usdm": {
+      accepts: {
+        scheme: "exact",
+        network: "cardano:preprod",
+        payTo: SELLER_ADDRESS,
+        // Same address-to-address transfer as the first route — the only
+        // difference is the asset. x402 names a native token as
+        // `policyId.assetNameHex`; tUSDM has 6 decimals, so 100000 = 0.10.
+        price: { amount: "100000", asset: USDM_ASSET },
+        maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+        extra: { assetTransferMethod: "default", ...policyExtra() },
+      },
+      description: "A message you can only read after paying 0.10 tUSDM",
+      mimeType: "application/json",
+    },
+    "GET /api/message-masumi-usdm": {
+      accepts: {
+        scheme: "exact",
+        network: "cardano:preprod",
+        payTo: masumiToken.payTo,
+        // Masumi escrow lock paid in a NATIVE TOKEN rather than ADA. The
+        // requested amount is the token; the lovelace on the escrow output is
+        // purely structural (post-SubmitResult min-UTxO), and the client
+        // computes it as `collateral_return_lovelace` — the seller neither
+        // supplies nor signs it.
+        price: { amount: masumiToken.amount, asset: masumiToken.asset },
+        maxTimeoutSeconds: masumiToken.maxTimeoutSeconds,
+        extra: masumiToken.extra,
+      },
+      description: "A message unlocked by locking 0.25 tUSDM into the Masumi escrow",
+      mimeType: "application/json",
+    },
   };
 }
 
 /**
- * Builds the route payment config. Called **per request** so the masumi
- * deadlines are fresh; `paymentMiddleware` takes a static routes object, so a
- * config built once at startup would freeze `payByTime` at boot and start
- * rejecting locks as soon as that deadline passed.
- *
- * @returns The routes config for `paymentMiddleware`.
+ * Demo control surface: read and change the policies the 402 advertises, so the
+ * whole feature matrix is reachable from the UI instead of a restart. Not part
+ * of x402 — a real server fixes these per resource.
  */
-function buildRoutes(): RoutesConfig {
-  return {
-      "GET /api/message": {
-        accepts: {
-          scheme: "exact",
-          network: "cardano:preprod",
-          payTo: SELLER_ADDRESS,
-          // 2 tADA in lovelace. Comfortably above the ~1 ADA min-UTxO the
-          // facilitator enforces (verification rule 7).
-          price: { amount: "2000000", asset: "lovelace" },
-          // Cardano blocks are slow vs EVM L2s; give the tx 10 minutes of TTL.
-          maxTimeoutSeconds: 600,
-          extra: { assetTransferMethod: "default" },
-        },
-        description: "A message you can only read after paying 2 tADA",
-        mimeType: "application/json",
-      },
-      "GET /api/message-masumi": {
-        accepts: {
-          scheme: "exact",
-          network: "cardano:preprod",
-          payTo: MASUMI_ESCROW_ADDRESS,
-          // 5 tADA in lovelace. Masumi locks ADA into an escrow UTxO that also
-          // carries an inline datum, which raises the min-UTxO requirement
-          // above a plain address-to-address transfer — 5 tADA stays
-          // comfortably clear of that floor.
-          price: { amount: "5000000", asset: "lovelace" },
-          maxTimeoutSeconds: 600,
-          // The server declares only the SELLER-side datum fields. A real
-          // deployment gets these from the Masumi payment request it creates
-          // per request (POST /payment on its Masumi Payment Service); they are
-          // fabricated here for the demo. The facilitator compares the on-chain
-          // lock datum against these exact values, so they must stay stable
-          // constants (not randomized) — the frontend copies them verbatim.
-          //
-          // The BUYER-side fields (identifierFromPurchaser -> buyer_nonce,
-          // inputHash, buyerReturnAddress) are deliberately absent: this 402
-          // answers an unauthenticated request, so the server does not know who
-          // is calling and cannot fill them. The wallet supplies them when it
-          // builds the datum (frontend/src/x402/cip30Signer.ts, via
-          // buildMasumiLockInline() from @x402/cardano).
-          extra: masumiExtra(),
-        },
-        description: "A message unlocked by locking 5 tADA into the (demo) Masumi escrow",
-        mimeType: "application/json",
-      },
-      "GET /api/message-usdm": {
-        accepts: {
-          scheme: "exact",
-          network: "cardano:preprod",
-          payTo: SELLER_ADDRESS,
-          // Same address-to-address transfer as the first route — the only
-          // difference is the asset. x402 names a native token as
-          // `policyId.assetNameHex`; tUSDM has 6 decimals, so 100000 = 0.10.
-          // The wallet must actually hold this token, and its output carries
-          // min-ADA alongside the token (the client's autoMinUtxo handles that).
-          price: { amount: "100000", asset: USDM_ASSET },
-          maxTimeoutSeconds: 600,
-          extra: { assetTransferMethod: "default" },
-        },
-        description: "A message you can only read after paying 0.10 tUSDM",
-        mimeType: "application/json",
-      },
-      "GET /api/message-masumi-usdm": {
-        accepts: {
-          scheme: "exact",
-          network: "cardano:preprod",
-          payTo: MASUMI_ESCROW_ADDRESS,
-          // Masumi escrow lock paid in a NATIVE TOKEN rather than ADA. Here the
-          // requested amount is the token; the lovelace on the escrow output is
-          // purely structural (post-result min-UTxO + collateral) and the wallet
-          // computes it via masumiTokenLockLovelace() — see the signer.
-          price: { amount: "250000", asset: USDM_ASSET },
-          maxTimeoutSeconds: 600,
-          extra: masumiExtra(),
-        },
-        description: "A message unlocked by locking 0.25 tUSDM into the (demo) Masumi escrow",
-        mimeType: "application/json",
-      },
-  };
-}
+app.get("/demo/config", (_req, res) => {
+  res.json({
+    ...demoConfig,
+    escrowAddress: MASUMI_ESCROW_ADDRESS,
+    sellerAddress: MASUMI_SELLER.sellerAddress,
+  });
+});
 
-// The middleware is rebuilt only when the masumi deadlines refresh, not per
-// request: paymentMiddleware() takes a static routes object and calls
-// initialize() (a GET /supported round-trip) once per construction, so building
-// one per request would re-fetch that every time. Memoizing on the deadline
-// object also keeps the advertised requirements byte-identical across a
-// payment's 402 and retry, which is what makes them match.
+app.post("/demo/config", express.json(), (req, res) => {
+  const { submissionPolicy, l1Confirmations } = (req.body ?? {}) as Partial<DemoConfig>;
+  if (submissionPolicy !== undefined) {
+    if (!["server", "client", "either"].includes(submissionPolicy)) {
+      return res.status(400).json({ error: "submissionPolicy must be server, client or either" });
+    }
+    demoConfig.submissionPolicy = submissionPolicy;
+  }
+  if (l1Confirmations !== undefined) {
+    if (!Number.isInteger(l1Confirmations) || l1Confirmations < -1 || l1Confirmations > 20) {
+      return res.status(400).json({ error: "l1Confirmations must be an integer from -1 to 20" });
+    }
+    demoConfig.l1Confirmations = l1Confirmations;
+  }
+  // The advertised requirements just changed, so the memoized middleware and
+  // the issued Masumi objects must be rebuilt on the next request.
+  cachedMiddleware = null;
+  console.log(
+    `[server] demo config → submissionPolicy=${demoConfig.submissionPolicy} ` +
+      `l1Confirmations=${demoConfig.l1Confirmations}`,
+  );
+  return res.json(demoConfig);
+});
+
+// The middleware is memoized rather than rebuilt per request: paymentMiddleware()
+// takes a static routes object and calls initialize() (a GET /supported
+// round-trip) once per construction. Memoizing on the issued requirements also
+// keeps them byte-identical across a payment's 402 and retry, which is what
+// makes the client's echoed `accepted` match.
 let cachedMiddleware: {
-  deadlines: Record<string, string>;
+  routes: RoutesConfig;
   handler: ReturnType<typeof paymentMiddleware>;
 } | null = null;
 
 app.use((req, res, next) => {
-  const deadlines = masumiDeadlines();
-  if (!cachedMiddleware || cachedMiddleware.deadlines !== deadlines) {
-    cachedMiddleware = { deadlines, handler: paymentMiddleware(buildRoutes(), resourceServer) };
-  }
-  return cachedMiddleware.handler(req, res, next);
+  void (async () => {
+    try {
+      const routes = await buildRoutes();
+      // Reference equality is enough: buildRoutes() returns the cached issued
+      // objects unchanged until they are reissued.
+      const unchanged =
+        cachedMiddleware &&
+        JSON.stringify(cachedMiddleware.routes) === JSON.stringify(routes);
+      if (!unchanged) {
+        cachedMiddleware = { routes, handler: paymentMiddleware(routes, resourceServer) };
+      }
+      return cachedMiddleware!.handler(req, res, next);
+    } catch (error) {
+      return next(error);
+    }
+  })();
 });
 
 // Only reached AFTER the facilitator verified the payment; the middleware
@@ -355,7 +466,14 @@ app.get("/api/message-masumi-usdm", (_req, res) => {
 // answers 402 while unpaid (the middleware short-circuits) and then 404s the
 // moment a payment succeeds — with settlement cancelled, since the middleware
 // aborts /settle when the handler responds >= 400.
-const pricedRoutes = Object.keys(buildRoutes()).map((r) => r.replace(/^GET\s+/, ""));
+// The route KEYS are static even though their requirements are issued lazily,
+// so this guard needs no Masumi issuance at boot.
+const pricedRoutes = [
+  "/api/message",
+  "/api/message-masumi",
+  "/api/message-usdm",
+  "/api/message-masumi-usdm",
+];
 const servedRoutes = new Set(
   (app._router?.stack ?? [])
     .filter((l: { route?: { path?: string } }) => typeof l.route?.path === "string")

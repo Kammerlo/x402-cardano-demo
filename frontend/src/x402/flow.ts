@@ -15,7 +15,11 @@ import { pickCardanoRequirements } from "../lib/x402Types";
 export type FlowStep =
   | { id: "request"; title: string; detail: { url: string; status: number } }
   | { id: "required"; title: string; detail: unknown } // decoded PaymentRequired
-  | { id: "build"; title: string; detail: { nonce: string; transactionBase64: string } }
+  | {
+      id: "build";
+      title: string;
+      detail: { nonce: string; submissionMode?: string; transactionBase64: string };
+    }
   | { id: "pay"; title: string; detail: unknown } // full PaymentPayload sent
   | { id: "settled"; title: string; detail: unknown }; // decoded SettleResponse + body
 
@@ -41,6 +45,7 @@ export async function runPaymentFlow(
   signer: ClientCardanoSigner,
   onStep: (step: FlowStep) => void,
   method: PaymentMethod = "default",
+  preferredSubmissionMode: "server" | "client" = "server",
 ): Promise<void> {
   const path = METHOD_PATHS[method];
   const url = `${serverUrl}${path}`;
@@ -57,13 +62,17 @@ export async function runPaymentFlow(
   // 2. Pick the cardano:preprod exact option and build+sign the payment tx.
   const accepted = pickCardanoRequirements(paymentRequired);
   if (!accepted) throw new Error("Server offered no exact/cardano:preprod option");
-  const scheme = new ExactCardanoScheme(signer);
+  // The second argument only matters when the server's `submissionPolicy` is
+  // `either`: the client then picks which side broadcasts. With a policy of
+  // `server` or `client` the scheme uses that and ignores the preference.
+  const scheme = new ExactCardanoScheme(signer, preferredSubmissionMode);
   const result = await scheme.createPaymentPayload(2, accepted);
   onStep({
     id: "build",
     title: "Wallet built and signed the payment transaction",
     detail: {
       nonce: (result.payload as { nonce: string }).nonce,
+      submissionMode: (result.payload as { submissionMode?: string }).submissionMode,
       transactionBase64: (result.payload as { transaction: string }).transaction,
     },
   });

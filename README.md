@@ -8,7 +8,7 @@ All three x402 roles run locally: the browser **client**, the resource **server*
 
 The resource server can't validate a Cardano transaction itself, so it delegates to a facilitator: `/verify` (does this signed tx really pay the seller, un-replayed?) and `/settle` (submit it, wait for a block).
 
-`facilitator/` is the smallest spec-compatible implementation — **~130 lines, no protocol logic of its own**. `@x402/cardano` already ships the reference facilitator-role scheme (all seven verification rules, the nonce/replay guard, the duplicate-settlement cache, the masumi checks); this is just the HTTP surface the spec defines wired to it. Compatibility comes from reusing the reference implementation rather than re-deriving it.
+`facilitator/` is the smallest spec-compatible implementation — **~150 lines, no protocol logic of its own**. `@x402/cardano` already ships the reference facilitator-role scheme (all nine verification rules, the nonce/replay guard, the canonical-txid duplicate-settlement cache, the submission/confirmation policies and the masumi checks); this is just the HTTP surface the spec defines wired to it. Compatibility comes from reusing the reference implementation rather than re-deriving it.
 
 It **holds no funds and signs nothing** — the client's wallet pays the fee and signs everything, so the facilitator needs only a Blockfrost project id to read chain state and broadcast (no mnemonic, no keys).
 
@@ -89,16 +89,42 @@ All three consume the sibling `../x402/typescript` workspace via npm `file:` lin
 > curl -s "https://preprod.koios.rest/api/v1/address_assets?_addresses=addr_test1..." | head
 > ```
 
-`GET /api/message-masumi` — **5 tADA, escrow lock** (`assetTransferMethod: "masumi"`): modeled on [Masumi](https://www.masumi.network/)'s agent-payment escrow. Instead of paying the seller, the wallet locks the ADA into an escrow output carrying a **19-field inline Plutus datum** (buyer/seller, reference key + signature, nonces, agent id, four lifecycle timestamps). x402 covers only the **lock**; releasing it later is out of scope. Pick it in the UI's Step B before running the flow. The included facilitator verifies these locks (the masumi rules come with `@x402/cardano`'s scheme); a substitute facilitator must implement them too.
+`GET /api/message-masumi` — **5 tADA, escrow lock** (`assetTransferMethod: "masumi"`): modeled on [Masumi](https://www.masumi.network/)'s agent-payment escrow. Instead of paying the seller, the wallet locks the ADA into an escrow output carrying a **19-field inline Plutus datum** (buyer/seller, the seller's COSE key + signature, nonces, agent id, collateral, the request hash, four lifecycle timestamps and the `FundsLocked` state). x402 covers only the **lock**; releasing it later is governed by the escrow contract and is out of scope. Pick it in the UI's Step B before running the flow. The included facilitator verifies these locks (the masumi rules come with `@x402/cardano`'s scheme); a substitute facilitator must implement them too.
 
-`GET /api/message-masumi-usdm` — **0.25 tUSDM, escrow lock**: the two extensions combined — a Masumi lock whose value is a native token. This one case can't rely on `autoMinUtxo`: the requested amount is the *token*, so the escrow output's lovelace is purely structural and must clear the **post-result** min-UTxO (the datum grows once `result_hash` is filled) and cover the collateral. The wallet sizes it with `masumiTokenLockLovelace()` from `@x402/cardano`, using live protocol parameters.
+`GET /api/message-masumi-usdm` — **0.25 tUSDM, escrow lock**: the two extensions combined — a Masumi lock whose value is a native token. This one case can't rely on `autoMinUtxo`: the requested amount is the *token*, so the escrow output's lovelace is purely structural and must clear the **post-result** min-UTxO (the datum grows once `result_hash` is filled) and cover the collateral. The client computes it as `collateral_return_lovelace` via `buildMasumiLock()` from `@x402/cardano`, using live protocol parameters — the seller never supplies or signs that field, and the escrow output must carry exactly `requestedLovelace + collateral`.
 
-Two caveats on the masumi route, both deliberate for a demo:
+### What the masumi route actually does now
 
-- **The purchase data is fake.** A real Masumi lock gets its reference key/signature, nonces, and timestamps from the Masumi Payment Service. This demo fabricates fixed values — every one marked `// DUMMY:` in code (`grep -rn "// DUMMY:" server/src frontend/src`).
+Two things changed with the current spec, and both are load-bearing:
 
-  Note **which side supplies what**, because the datum is filled from two places. The server's route `extra` declares only the **seller-side** fields (reference key/signature, `sellerNonce`, `agentIdentifier`, the four timestamps, `collateralReturnLovelace`); the wallet passes them straight to `buildMasumiLockInline()` from `@x402/cardano`, which encodes them into the datum verbatim — they must agree byte-for-byte or the facilitator rejects the lock. The **buyer-side** fields (`buyer_nonce`, `input_hash`, `buyer_return_address`) are *not* in the 402 at all — the server answers an unauthenticated request and cannot know them, so the wallet fills them itself. The demo passes no buyer input at all, so the library generates a fresh `buyer_nonce` (14–26 hex characters, the range Masumi accepts) and leaves the other two at their contract defaults; a real integration would pass the values its Masumi purchase was created with.
-- **The escrow is a recoverable stand-in.** `MASUMI_ESCROW_ADDRESS` defaults to `SERVER_CARDANO_ADDRESS` — a plain address you control, not the real `vested_pay` script — so demo funds stay reclaimable. A real deployment would point it at the actual script address.
+- **The escrow address is derived, not chosen.** The facilitator applies the deployment parameters (`required_admins_multi_sig`, `admin_vks`, `cooldown_period`) to the canonical `vested_pay` blueprint, derives the script address itself, and requires `payTo` to equal it — a look-alike escrow with different admins is a different trust domain. There is no `MASUMI_ESCROW_ADDRESS` any more, and **no recoverable stand-in**: the masumi routes lock into the real preprod escrow, and releasing those funds needs the Masumi lifecycle (result submission, refund, dispute). Keep the amounts small.
+- **The seller signs the terms.** A masumi 402 is no longer hand-written. `issueMasumiRequirements()` builds the request commitment, assembles `terms`, and gets a CIP-8 `COSE_Sign1` over `termsDigest` from the selling wallet (`MASUMI_SELLER_MNEMONIC`, defaulting to the well-known test phrase). Client *and* facilitator re-verify all of it — commitment digests, `termsDigest`, the COSE address binding, the derived escrow address, and the compatibility identifier — before any value moves. The buyer no longer invents `buyer_nonce` or `input_hash`: the seller signs both, and the only buyer-chosen datum field left is `buyer_return_address`.
+
+No `agentIdentifier` is declared. A non-empty one is a Masumi **registry claim**, and the spec requires it to be validated independently on-chain; `@x402/cardano` refuses a claim it cannot validate, so a fabricated identifier is now rejected rather than waved through. Omitting it means "unregistered seller", which is what this demo is.
+
+## Choosing the settlement behaviour
+
+Step B exposes the two shared policies every Cardano x402 payment carries in `PaymentRequirements.extra`, so the whole feature matrix is reachable without editing code. Changing either one POSTs to the server's `/demo/config` and the next 402 carries it.
+
+**Who broadcasts** (`extra.submissionPolicy`):
+
+| Setting | What happens |
+| --- | --- |
+| `server` | You only sign. The facilitator broadcasts after it verifies — the classic flow. |
+| `client` | Your wallet broadcasts *before* the paid retry. The facilitator never submits it; it authenticates settlement evidence for that exact transaction. |
+| `either` | The server allows both and the client picks (a second control appears). |
+
+Client submission costs one extra block of waiting: Blockfrost exposes no mempool read, so a just-broadcast transaction is invisible until a block includes it, and the wallet waits for that before retrying. Retrying sooner is rejected with `..._evidence_mismatch` — the facilitator has nothing to authenticate.
+
+**Minimum blocks** (`extra.confirmationPolicy.l1Confirmations`), a slider from −1 to 20:
+
+- `-1` — authenticated mempool acceptance. Fastest and riskiest; a mempool transaction can still be rolled back, so the facilitator refuses it unless its operator sets `ACCEPT_MEMPOOL=true`.
+- `0` — inclusion in a canonical block (~20s on preprod).
+- `1..20` — that many *newer* blocks on top. The spec default is 1; each step costs roughly another 20s. The demo facilitator waits up to `CONFIRMATION_TIMEOUT_MS` (8 minutes by default) before answering `payment_pending`.
+
+The settlement receipt in Step D reports what was actually achieved — `status`, `submissionMode` and `confirmations` — not just what was asked for.
+
+**Hydra is not implemented.** `terms.settlementPolicy` is always `l1` here, the facilitator advertises `settlementLayers: ["l1"]`, and a `settlementLayer: "hydra"` payload is rejected. Authenticating a Hydra payment needs verified Init state, head parameters, a seller-participant binding and `SnapshotConfirmed` evidence — none of which this demo has.
 
 ## Troubleshooting
 

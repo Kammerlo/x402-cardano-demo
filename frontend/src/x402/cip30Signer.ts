@@ -10,21 +10,25 @@
  *   nonce  = first wallet UTxO, forced as an input via collectFrom
  *            (the facilitator's replay protection - verification rule 5)
  *   output = payTo receives the requested asset (lovelace or a native token)
- *   TTL    = now + maxTimeoutSeconds (verification rule 6)
+ *   TTL    = now + maxTimeoutSeconds, or pay_by_time for a Masumi lock
+ *   submit = only in `client` submission mode; in `server` mode the signed
+ *            transaction is handed over unbroadcast.
  */
 import {
   Address,
   Assets,
   Client,
-  Data,
   Transaction,
+  TransactionBody,
+  TransactionHash,
   preprod,
 } from "@evolution-sdk/evolution";
 import {
-  buildMasumiLockInline,
+  buildMasumiLock,
   LOVELACE_ASSET,
-  masumiTokenLockLovelace,
   parseAssetUnit,
+  validateMasumiExtra,
+  verifyMasumiAuthorization,
   type CardanoExtraMasumi,
   type ClientCardanoSigner,
   type ClientCardanoSignInput,
@@ -59,8 +63,7 @@ export interface Cip30WalletApi {
  *
  * Fetched straight from Blockfrost because a CIP-30-backed Evolution client
  * exposes no `getProtocolParameters()` on its promise API (only seed-backed
- * clients do). Needed to size a Masumi token lock, which cannot rely on
- * `autoMinUtxo` — see buildOutputAssets' masumi branch.
+ * clients do). A Masumi lock needs it to size `collateral_return_lovelace`.
  *
  * @param blockfrost - Provider connection.
  * @returns The `coinsPerUtxoByte` value.
@@ -78,6 +81,49 @@ async function fetchCoinsPerUtxoByte(blockfrost: {
     throw new Error("Blockfrost protocol parameters did not include coins_per_utxo_size");
   }
   return BigInt(params.coins_per_utxo_size);
+}
+
+/**
+ * Waits until the provider can actually see a transaction.
+ *
+ * Blockfrost exposes no mempool read, so a just-broadcast transaction is
+ * invisible until a block includes it. In CLIENT submission mode the
+ * facilitator does not broadcast — it authenticates settlement evidence for the
+ * transaction the wallet already sent — so retrying before the chain has seen
+ * it is rejected with `..._evidence_mismatch`. Waiting here is what makes the
+ * paid retry meaningful; it is the cost of choosing client submission against a
+ * provider without mempool visibility.
+ *
+ * @param txHash     - The canonical transaction id to wait for.
+ * @param blockfrost - Provider connection.
+ * @param timeoutMs  - How long to keep waiting.
+ * @returns Nothing; resolves once the transaction is observable.
+ */
+async function waitUntilVisible(
+  txHash: string,
+  blockfrost: { baseUrl: string; projectId: string },
+  timeoutMs = 180_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const res = await fetch(`${blockfrost.baseUrl}/txs/${txHash}`, {
+        headers: { project_id: blockfrost.projectId },
+      });
+      if (res.ok) return;
+    } catch {
+      // Transient provider error — keep waiting until the deadline.
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Your wallet broadcast ${txHash}, but the chain has not shown it within ` +
+          `${Math.round(timeoutMs / 1000)}s. In client-submission mode the facilitator ` +
+          "authenticates the transaction rather than sending it, so it cannot proceed until " +
+          "the payment is visible.",
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
 }
 
 /** `txHash#index` for a wallet UTxO, matching the x402 nonce format. */
@@ -177,6 +223,46 @@ export async function createCip30Signer(
 
     async buildAndSignPaymentTransaction(input: ClientCardanoSignInput) {
       const isLovelace = input.asset.toLowerCase() === LOVELACE_ASSET;
+      const method = String(input.extra?.assetTransferMethod ?? "default");
+
+      // ── Masumi: validate the 402 BEFORE touching the wallet ────────────────
+      //
+      // The buyer is about to move real value, and in `client` submission mode
+      // it broadcasts before any facilitator sees the payment. So the client
+      // runs the seller-authorization checks itself: the request commitment
+      // recomputes, `termsDigest` is what the seller's CIP-8 signature covers,
+      // the escrow address derives from the deployment parameters, and the
+      // compatibility identifier decodes to the same values. A malicious 402
+      // that redirects `payTo` or invents terms is refused here, unpaid.
+      let masumiExtra: CardanoExtraMasumi | undefined;
+      if (method === "masumi") {
+        const schema = validateMasumiExtra(input.extra, input.network);
+        if (!schema.ok) throw new Error(`Masumi requirements are invalid: ${schema.detail}`);
+        masumiExtra = schema.extra;
+
+        const authorization = verifyMasumiAuthorization(
+          masumiExtra,
+          {
+            scheme: "exact",
+            network: input.network as `${string}:${string}`,
+            asset: input.asset,
+            amount: input.amount,
+            payTo: input.payTo,
+            maxTimeoutSeconds: input.maxTimeoutSeconds,
+            extra: input.extra ?? {},
+          },
+          // The demo's issuer echoes every committed part, so there is nothing
+          // for the buyer to recompute locally — but requiring it means an
+          // unverifiable part is refused rather than trusted.
+          { requireAllPartContent: true },
+        );
+        if (!authorization.ok) {
+          throw new Error(
+            `Masumi seller authorization failed: ${authorization.reason}` +
+              (authorization.detail ? ` (${authorization.detail})` : ""),
+          );
+        }
+      }
 
       const utxos = await client.getWalletUtxos();
       if (utxos.length === 0) throw new Error("Wallet has no UTxOs — fund it at the preprod faucet");
@@ -191,68 +277,60 @@ export async function createCip30Signer(
       // below), so neither the nonce nor a fee input can be a spent UTxO.
       const { usable } = await liveUtxos(utxos, address, blockfrost);
       const nonceUtxo = usable[0];
-      const nonceTxHash = Buffer.from(nonceUtxo.transactionId.hash).toString("hex").toLowerCase();
-      const nonce = `${nonceTxHash}#${Number(nonceUtxo.index)}`;
+      const nonce = utxoRef(nonceUtxo);
 
-      // "default" pays payTo a plain lovelace output (unchanged). "masumi"
-      // additionally attaches the 19-field inline escrow-lock datum, which
-      // @x402/cardano builds for us from the server's seller-side extra. The
-      // third argument is the buyer-side half of the datum: the server answered
-      // an unauthenticated request and cannot know it, so the wallet supplies
-      // it. Passing nothing lets the library generate a fresh buyer nonce and
-      // take the contract defaults — enough for this demo, which has no real
-      // Masumi purchase to bind to.
+      // "default" pays payTo a plain output. "masumi" additionally attaches the
+      // 19-field inline escrow-lock datum, which @x402/cardano builds from the
+      // seller-signed terms.
       //
-      // The datum's `buyer` field must equal the payer the facilitator resolves
-      // — the nonce UTxO's owner — so it's derived from that UTxO, not from
-      // client.address() (usually the same wallet address, but the nonce UTxO
-      // is what the facilitator checks).
-      const method = String(input.extra?.assetTransferMethod ?? "default");
-      const datum =
-        method === "masumi"
-          ? buildMasumiLockInline(
-              input.extra as unknown as CardanoExtraMasumi,
-              Address.toBech32(nonceUtxo.address),
-            )
-          : undefined;
-      // Both a datum-bearing output and a native-token output need more coin
-      // than a plain lovelace payment: the datum enlarges the output, and a
-      // token output must still carry min-ADA alongside the token. autoMinUtxo
-      // raises the coin to the protocol minimum for those two cases, leaving a
-      // plain lovelace payment to build exactly as before.
-      const autoMinUtxo = method === "masumi" || !isLovelace;
-
-      // A native-token Masumi lock is the one case autoMinUtxo cannot size.
-      // The escrow output's lovelace there is purely structural: the requested
-      // amount is the TOKEN, and the coin alongside it must still clear the
-      // *post-result* min-UTxO (the datum grows once result_hash is filled)
-      // and cover the collateral the seller later reclaims. autoMinUtxo only
-      // measures today's smaller datum, so compute the floor explicitly —
-      // mirroring the reference signer in @x402/cardano.
+      // Everything in that datum now comes from `terms` — including
+      // `buyer_nonce` and `input_hash`, which the seller signs. The only
+      // buyer-chosen field left is `buyer_return_address` (omitted here), plus
+      // `collateral_return_lovelace`, which the CLIENT computes: the seller
+      // never supplies or signs it, and the escrow output must carry exactly
+      // `requestedLovelace + collateral`.
+      //
+      // The datum's `buyer` must equal the payer the facilitator resolves — the
+      // nonce UTxO's owner — so it is derived from that UTxO rather than from
+      // client.address().
       let outputAssets = buildOutputAssets(input.asset, BigInt(input.amount));
-      if (method === "masumi" && datum && !isLovelace) {
+      let datum: ReturnType<typeof buildMasumiLock>["datum"] | undefined;
+      let autoMinUtxo = !isLovelace;
+
+      if (method === "masumi") {
         const coinsPerUtxoByte = await fetchCoinsPerUtxoByte(blockfrost);
-        const datumBytes = Data.toCBORHex(datum.data).length / 2;
-        const masumiExtra = input.extra as unknown as CardanoExtraMasumi;
-        const collateral = masumiExtra.collateralReturnLovelace
-          ? BigInt(masumiExtra.collateralReturnLovelace)
-          : 0n;
-        const { policyId, assetNameHex } = parseAssetUnit(input.asset);
-        outputAssets = Assets.addByHex(
-          Assets.fromLovelace(masumiTokenLockLovelace(datumBytes, collateral, coinsPerUtxoByte)),
-          policyId,
-          assetNameHex,
+        const lock = buildMasumiLock(
+          masumiExtra!,
+          Address.toBech32(nonceUtxo.address),
+          input.asset,
           BigInt(input.amount),
+          coinsPerUtxoByte,
         );
+        datum = lock.datum;
+        // The escrow output carries EXACTLY the requested asset set with
+        // exactly `requestedLovelace + collateral` lovelace — autoMinUtxo would
+        // bump the coin and break that equality, so it stays off.
+        autoMinUtxo = false;
+        outputAssets = isLovelace
+          ? Assets.fromLovelace(lock.lockedLovelace)
+          : (() => {
+              const { policyId, assetNameHex } = parseAssetUnit(input.asset);
+              return Assets.addByHex(
+                Assets.fromLovelace(lock.lockedLovelace),
+                policyId,
+                assetNameHex,
+                BigInt(input.amount),
+              );
+            })();
       }
 
-      // Masumi: pin the validity upper bound to pay_by_time (see .setValidity
-      // below). Masumi invalidates a lock that lands after that deadline, so
-      // the transaction must be unable to settle past it.
-      const payByTime = input.extra?.payByTime;
+      // Masumi: pin the validity upper bound to pay_by_time. The facilitator
+      // rejects a lock whose TTL could settle after the deadline, so the
+      // transaction must be unable to land past it. Other methods use
+      // maxTimeoutSeconds.
       const ttlMs =
-        method === "masumi" && typeof payByTime === "string"
-          ? BigInt(payByTime)
+        method === "masumi"
+          ? BigInt(masumiExtra!.terms.payByTime)
           : BigInt(Date.now()) + BigInt(input.maxTimeoutSeconds) * 1000n;
 
       const signBuilder = await client
@@ -263,11 +341,6 @@ export async function createCip30Signer(
           assets: outputAssets,
           ...(datum ? { datum } : {}),
         })
-        // Wall-clock ms; the SDK converts it to the TTL slot. For masumi the
-        // upper bound is anchored to the datum's pay_by_time so the lock can
-        // never settle past the escrow deadline — the facilitator rejects a
-        // masumi lock whose TTL could land after it. Other methods just use
-        // maxTimeoutSeconds.
         .setValidity({ to: ttlMs })
         // availableUtxos restricts coin selection to the confirmed-unspent set.
         // Without it the builder would draw fee inputs from the wallet's cached
@@ -286,9 +359,33 @@ export async function createCip30Signer(
         auxiliaryData: null,
       });
 
+      // ── Submission mode ───────────────────────────────────────────────────
+      //
+      // `server`: hand the signed transaction over unbroadcast — the resource
+      //   server or facilitator submits it after verifying.
+      // `client`: broadcast NOW, before the paid retry. The facilitator then
+      //   MUST NOT submit it again; it authenticates settlement evidence for
+      //   this exact transaction instead. That means the retry only succeeds
+      //   once the chain has actually seen it, so this path is slower to
+      //   report success — that is the protocol working, not a bug.
+      const transaction = Buffer.from(Transaction.toCBORBytes(signed)).toString("base64");
+      if (input.submissionMode === "client") {
+        await submitBuilder.submit();
+        // The canonical transaction id is the hash of the BODY bytes, computed
+        // exactly as the facilitator does, so the evidence lookup matches.
+        const txBytes = Uint8Array.from(Buffer.from(transaction, "base64"));
+        const txHash = TransactionHash.toHex(
+          TransactionBody.toHashFromBytes(Transaction.extractBodyBytes(txBytes)),
+        );
+        await waitUntilVisible(txHash, blockfrost);
+      }
+
       return {
-        transaction: Buffer.from(Transaction.toCBORBytes(signed)).toString("base64"),
+        transaction,
         nonce,
+        submissionMode: input.submissionMode,
+        // L1 only: this demo drives no Hydra head.
+        ...(method === "masumi" ? { settlementLayer: "l1" as const } : {}),
       };
     },
   };

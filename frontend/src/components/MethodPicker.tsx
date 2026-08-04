@@ -43,13 +43,14 @@ export function MethodPicker({ method, onChange, disabled }: MethodPickerProps) 
           </button>
         ))}
       </div>
-      {method === "masumi" && (
+      {(method === "masumi" || method === "masumi-usdm") && (
         <p className="step-note">
-          <strong>This locks funds — it doesn&rsquo;t pay the seller.</strong> The 5 tADA goes into an escrow
-          contract (the <code>vested_pay</code> script) carrying a 19-field on-chain datum, not straight to the
-          seller&rsquo;s address. In this demo the escrow is a <strong>recoverable stand-in</strong> address, and the
-          datum&rsquo;s purchase identifiers are <strong>dummy values</strong> — a real deployment gets them from the
-          Masumi Payment Service.
+          <strong>This locks funds into the real escrow — it doesn&rsquo;t pay the seller.</strong> The payment
+          goes to the <code>vested_pay</code> script address, carrying a 19-field inline datum. That address is no
+          longer a stand-in: the facilitator applies the deployment parameters to the canonical blueprint, derives
+          the address itself, and rejects any other <code>payTo</code>. Releasing locked funds needs the Masumi
+          escrow lifecycle (result submission, refund, dispute) — <strong>spending the UTxO back is not
+          possible</strong>. Keep the amounts small.
         </p>
       )}
     </div>

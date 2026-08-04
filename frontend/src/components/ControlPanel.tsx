@@ -2,6 +2,7 @@ import type { WalletInfo } from "../lib/cip30";
 import type { PaymentMethod } from "../x402/flow";
 import { WalletPicker, type WalletConnection } from "./WalletPicker";
 import { MethodPicker } from "./MethodPicker";
+import { SettlementOptions, type DemoSettlement } from "./SettlementOptions";
 
 export type RunState = "idle" | "running" | "done" | "error";
 
@@ -16,6 +17,10 @@ interface ControlPanelProps {
   runState: RunState;
   onBegin: () => void;
   onReset: () => void;
+  settlement: DemoSettlement;
+  onSettlementChange: (next: DemoSettlement) => void;
+  settlementSyncing?: boolean;
+  settlementError?: string | null;
 }
 
 /** Connect a wallet, then run the protocol. The one place on the page that
@@ -31,6 +36,10 @@ export function ControlPanel({
   runState,
   onBegin,
   onReset,
+  settlement,
+  onSettlementChange,
+  settlementSyncing,
+  settlementError,
 }: ControlPanelProps) {
   const onPreprod = connection?.networkId === 0;
   const hint =
@@ -59,6 +68,13 @@ export function ControlPanel({
         <h2>Run the protocol</h2>
         <MethodPicker method={method} onChange={onMethodChange} disabled={runState === "running"} />
         <p className="control-panel__hint">{hint}</p>
+        <SettlementOptions
+          value={settlement}
+          onChange={onSettlementChange}
+          disabled={runState === "running"}
+          syncing={settlementSyncing}
+          syncError={settlementError}
+        />
         {runState === "done" || runState === "error" ? (
           <button type="button" className="btn btn--ghost" onClick={onReset}>
             Run it again

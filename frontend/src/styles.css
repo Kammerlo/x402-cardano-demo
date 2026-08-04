@@ -1418,3 +1418,53 @@ img {
     font-size: 1.25rem;
   }
 }
+
+/* ── Settlement options (submission policy + confirmation depth) ─────────── */
+.settlement-options {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  margin: 1rem 0 1.25rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settlement-options__group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.settlement-options__label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.settlement-options__label code {
+  font-size: 0.72rem;
+  font-weight: 400;
+  opacity: 0.6;
+}
+
+.settlement-options__row {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.settlement-options__row input[type="range"] {
+  flex: 1;
+  accent-color: currentColor;
+}
+
+.settlement-options__value {
+  min-width: 2.5rem;
+  text-align: right;
+}

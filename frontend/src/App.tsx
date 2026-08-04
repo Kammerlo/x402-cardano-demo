@@ -8,6 +8,7 @@ import type { Actor } from "./lib/actors";
 import type { RailPhase } from "./components/ActorRail";
 import { Hero } from "./components/Hero";
 import { ControlPanel, type RunState } from "./components/ControlPanel";
+import type { DemoSettlement } from "./components/SettlementOptions";
 import type { WalletConnection } from "./components/WalletPicker";
 import { Timeline } from "./components/Timeline";
 import { Footer } from "./components/Footer";
@@ -27,6 +28,60 @@ export default function App() {
   const [runState, setRunState] = useState<RunState>("idle");
   const [errorMessage, setErrorMessage] = useState<string>();
   const [payStartedAt, setPayStartedAt] = useState<number | null>(null);
+
+  // The two shared policies the 402 advertises. They live on the SERVER (they
+  // are `PaymentRequirements.extra` fields), so changing them here PUTs the new
+  // value to the demo-config endpoint and the next 402 carries it.
+  const [settlement, setSettlement] = useState<DemoSettlement>({
+    submissionPolicy: "either",
+    preferredMode: "server",
+    l1Confirmations: 1,
+  });
+  const [settlementSyncing, setSettlementSyncing] = useState(false);
+  const [settlementError, setSettlementError] = useState<string | null>(null);
+
+  // Adopt whatever the server is already configured with, so the UI starts in
+  // sync rather than asserting defaults it never sent.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch(`${SERVER_URL}/demo/config`);
+        if (!res.ok) return;
+        const cfg = (await res.json()) as { submissionPolicy?: string; l1Confirmations?: number };
+        setSettlement((prev) => ({
+          ...prev,
+          submissionPolicy: (cfg.submissionPolicy as DemoSettlement["submissionPolicy"]) ?? prev.submissionPolicy,
+          l1Confirmations: cfg.l1Confirmations ?? prev.l1Confirmations,
+        }));
+      } catch {
+        // Server not up yet — the picker still works and syncs on first change.
+      }
+    })();
+  }, []);
+
+  async function handleSettlementChange(next: DemoSettlement) {
+    setSettlement(next);
+    if (runState !== "idle") handleReset();
+    // `preferredMode` is purely a client-side choice; only the two policy
+    // fields belong to the server's 402.
+    setSettlementSyncing(true);
+    setSettlementError(null);
+    try {
+      const res = await fetch(`${SERVER_URL}/demo/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          submissionPolicy: next.submissionPolicy,
+          l1Confirmations: next.l1Confirmations,
+        }),
+      });
+      if (!res.ok) setSettlementError(`HTTP ${res.status} — ${await res.text()}`);
+    } catch (e) {
+      setSettlementError(describeError(e));
+    } finally {
+      setSettlementSyncing(false);
+    }
+  }
 
   // Some wallet extensions inject into window.cardano a beat after the page
   // script runs; one delayed re-scan catches those without polling forever.
@@ -70,6 +125,7 @@ export default function App() {
           if (step.id === "pay") setPayStartedAt(Date.now());
         },
         method,
+        settlement.preferredMode,
       );
       setRunState("done");
     } catch (e) {
@@ -115,6 +171,10 @@ export default function App() {
           runState={runState}
           onBegin={handleBegin}
           onReset={handleReset}
+          settlement={settlement}
+          onSettlementChange={handleSettlementChange}
+          settlementSyncing={settlementSyncing}
+          settlementError={settlementError}
         />
 
         {(steps.length > 0 || runState !== "idle") && (

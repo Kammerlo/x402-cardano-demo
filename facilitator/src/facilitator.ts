@@ -32,6 +32,14 @@ const NETWORK = (process.env.CARDANO_NETWORK ?? "cardano:preprod") as Network;
 const BLOCKFROST_PROJECT_ID = process.env.BLOCKFROST_PROJECT_ID;
 const BLOCKFROST_BASE_URL =
   process.env.BLOCKFROST_BASE_URL ?? "https://cardano-preprod.blockfrost.io/api/v0";
+// A `confirmationPolicy` of -1 means "authenticated mempool acceptance is
+// enough". Mempool inclusion can be rolled back, so the facilitator refuses it
+// regardless of policy unless its OPERATOR opts in — this is that opt-in.
+const ACCEPT_MEMPOOL = process.env.ACCEPT_MEMPOOL === "true";
+// How long /settle waits for the payment to reach the requested block depth
+// before answering `payment_pending`. Preprod blocks are ~20s, so the default
+// covers the full 0..20 range the spec allows with room to spare.
+const CONFIRMATION_TIMEOUT_MS = Number(process.env.CONFIRMATION_TIMEOUT_MS ?? 8 * 60_000);
 
 if (!BLOCKFROST_PROJECT_ID) {
   throw new Error(
@@ -42,9 +50,14 @@ if (!BLOCKFROST_PROJECT_ID) {
 }
 
 // Chain access only: no `mnemonic`, so this runs "provider-only" and
-// getAddresses() is empty. awaitConfirmation makes /settle wait for real block
-// inclusion (status "confirmed") instead of returning at mempool acceptance,
-// which the spec strongly recommends before granting access to a resource.
+// getAddresses() is empty. awaitConfirmation makes submitTransaction wait for
+// real block inclusion rather than returning at mempool acceptance.
+//
+// The Blockfrost-backed signer also implements getTransactionEvidence(), which
+// is what lets this facilitator (a) honour a `confirmationPolicy` above 0 by
+// measuring real canonical depth, and (b) advertise CLIENT submission — in that
+// mode it never broadcasts, it authenticates the transaction the wallet already
+// sent. Without that hook the facilitator would advertise `server` only.
 const signer = toFacilitatorCardanoSigner({
   network: NETWORK,
   provider: { blockfrost: { baseUrl: BLOCKFROST_BASE_URL, projectId: BLOCKFROST_PROJECT_ID } },
@@ -54,7 +67,13 @@ const signer = toFacilitatorCardanoSigner({
 // One scheme on one network. Registering another (e.g. cardano:mainnet, or a
 // different scheme) is a second .register() call — the HTTP surface below is
 // scheme-agnostic and needs no changes.
-const facilitator = new x402Facilitator().register(NETWORK, new ExactCardanoScheme(signer));
+const facilitator = new x402Facilitator().register(
+  NETWORK,
+  new ExactCardanoScheme(signer, {
+    acceptMempool: ACCEPT_MEMPOOL,
+    confirmationTimeoutMs: CONFIRMATION_TIMEOUT_MS,
+  }),
+);
 
 const app = express();
 app.use(express.json({ limit: "1mb" })); // signed Cardano txs are multi-KB base64
@@ -140,5 +159,7 @@ app.listen(PORT, () => {
   console.log(`x402 Cardano facilitator listening on :${PORT}`);
   console.log(`  network:  ${NETWORK}`);
   console.log(`  provider: ${BLOCKFROST_BASE_URL}`);
+  console.log(`  mempool:  ${ACCEPT_MEMPOOL ? "accepted (l1Confirmations -1 works)" : "refused (set ACCEPT_MEMPOOL=true to allow -1)"}`);
+  console.log(`  wait:     up to ${Math.round(CONFIRMATION_TIMEOUT_MS / 1000)}s for the requested block depth`);
   console.log(`  kinds:    ${JSON.stringify(facilitator.getSupported().kinds)}`);
 });
