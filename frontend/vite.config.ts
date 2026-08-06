@@ -12,4 +12,14 @@ export default defineConfig({
   // node-polyfills plugin's build-time Buffer injection (it can't find
   // "vite-plugin-node-polyfills/shims/buffer" from outside our node_modules).
   resolve: { preserveSymlinks: true },
+  // Re-bundle the dependency cache on every dev start.
+  //
+  // Vite pre-bundles anything under node_modules and keys the cache on the
+  // resolved path plus package.json — NOT on file contents. `@x402/*` are
+  // symlinks into a package this demo is developed against, so rebuilding the
+  // library leaves the cache untouched and the browser silently keeps running
+  // the old code. That failure is near-undiagnosable from the UI: the frontend
+  // rejects a field the server correctly emits, and both look right in source.
+  // A couple of seconds per dev start is the cheaper trade.
+  optimizeDeps: { force: true },
 });

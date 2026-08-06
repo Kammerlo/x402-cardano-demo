@@ -106,21 +106,31 @@ No `agentIdentifier` is declared. A non-empty one is a Masumi **registry claim**
 
 Step B exposes the two shared policies every Cardano x402 payment carries in `PaymentRequirements.extra`, so the whole feature matrix is reachable without editing code. Changing either one POSTs to the server's `/demo/config` and the next 402 carries it.
 
+**The controls show what the facilitator can actually settle, not the whole spec.** A facilitator advertises its own limits in `GET /supported` (`submissionModes`, `l1Confirmations`), those limits depend on how it is built and configured, and `@x402/cardano` refuses to serve a 402 outside them. So the server reads `/supported` at startup, derives its own default from it, publishes the result on `/demo/config`, and rejects an unservable pair with a 400 explaining why; the UI greys out anything unavailable. The bundled facilitator offers all three policies — point the demo at one that doesn't and the controls narrow to match.
+
 **Who broadcasts** (`extra.submissionPolicy`):
 
 | Setting | What happens |
 | --- | --- |
-| `server` | You only sign. The facilitator broadcasts after it verifies — the classic flow. |
-| `client` | Your wallet broadcasts *before* the paid retry. The facilitator never submits it; it authenticates settlement evidence for that exact transaction. |
-| `either` | The server allows both and the client picks (a second control appears). |
+| `server` | You only sign. The facilitator validates the transaction against phase-1 ledger rules, then broadcasts — the classic flow. |
+| `client` | Your wallet broadcasts *before* the paid retry, through CIP-30 `submitTx` — the payer's own wallet, not this page's Blockfrost key. The facilitator never submits it; it authenticates settlement evidence for that exact transaction. |
+| `either` | The server allows both and the client picks (a second control appears). **The default**, since it is the only policy that hands the decision to the payer — the picker then sets `payload.submissionMode` on the payment itself. |
 
-Client submission costs one extra block of waiting: Blockfrost exposes no mempool read, so a just-broadcast transaction is invisible until a block includes it, and the wallet waits for that before retrying. Retrying sooner is rejected with `..._evidence_mismatch` — the facilitator has nothing to authenticate.
+Server submission carries a hazard the other modes don't: the resource server releases what you paid for *before* the facilitator broadcasts, so a transaction the ledger then rejects means you got the resource and the seller got nothing. `@x402/cardano` therefore refuses server mode unless the operator supplies `validatePhase1Transaction` — it ships none itself, because the answer depends on the chain provider and an approximation is worse than no server mode. `facilitator/src/phase1.ts` is this demo's implementation: it refuses any transaction whose value moves through something other than inputs and outputs (mint, certificates, withdrawals, scripts), and for the plain payments that remain it checks value conservation, fee sufficiency against the real serialized size, witness coverage and signature validity, min-UTxO and size limits, and the validity interval against the live tip.
+
+**Who checks that a client-submitted payment is really on the network.** The facilitator, not the browser. The client broadcasts through its wallet, hands the server the signed bytes, and retries the request while the answer is "not yet" — it never inspects the chain itself. Deciding whether the transaction exists, and waiting for the agreed confirmation depth, both belong to the party holding the provider credentials and the confirmation policy.
+
+The retry lives on the client because `/verify` performs a single evidence lookup and never polls: it cannot tell "broadcast a moment ago, still propagating" from "never sent", so blocking on every claim would let a fabricated payment tie up a facilitator request for minutes. The side that knows a transaction was broadcast is the side that broadcast it. Retrying is safe — a failed verification releases the server's claim and the fresh 402 reuses the same replay challenge. Confirmation *depth* is a separate question the facilitator does wait for, during `/settle`, up to `CONFIRMATION_TIMEOUT_MS`.
+
+The wait is short because the facilitator consults the mempool: a node holding the transaction has already validated it, which is evidence enough for `/verify`. Without that (the stock Blockfrost path) the payment could not verify until a block landed, ~20s on preprod.
 
 **Minimum blocks** (`extra.confirmationPolicy.l1Confirmations`), a slider from −1 to 20:
 
-- `-1` — authenticated mempool acceptance. Fastest and riskiest; a mempool transaction can still be rolled back, so the facilitator refuses it unless its operator sets `ACCEPT_MEMPOOL=true`.
+- `-1` — authenticated mempool acceptance. Fastest and riskiest; a mempool transaction can still be rolled back, so the facilitator refuses it unless its operator sets `ACCEPT_MEMPOOL=true`. Until then the slider stops at `0`, because the facilitator advertises a minimum of `0` and the server will not issue a 402 it cannot settle. Note that `@x402/cardano`'s stock Blockfrost evidence path reads confirmed transactions only and can never report `mempool` — `facilitator/src/evidence.ts` wraps it to consult `/mempool/{hash}`, which is what makes this setting mean anything at all.
 - `0` — inclusion in a canonical block (~20s on preprod).
 - `1..20` — that many *newer* blocks on top. The spec default is 1; each step costs roughly another 20s. The demo facilitator waits up to `CONFIRMATION_TIMEOUT_MS` (8 minutes by default) before answering `payment_pending`.
+
+Note that `HTTPFacilitatorClient` defaults to a **30 second** timeout, which is shorter than a single Cardano settlement — one confirmation alone is ~40s on preprod. Left at the default you get `502 Facilitator settle request timed out after 30000ms` on a payment that is settling perfectly well, and the failure is *indeterminate*: the facilitator may complete the settlement moments after the server stops listening. The demo server therefore reads the facilitator's own settle budget from `GET /health` and sizes its timeout above it. If you point it at a facilitator that publishes no budget, it falls back to 10 minutes; override with `FACILITATOR_TIMEOUT_MS`.
 
 The settlement receipt in Step D reports what was actually achieved — `status`, `submissionMode` and `confirmations` — not just what was asked for.
 

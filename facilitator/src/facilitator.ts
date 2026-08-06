@@ -25,6 +25,8 @@ import { x402Facilitator } from "@x402/core/facilitator";
 import type { Network, PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { toFacilitatorCardanoSigner } from "@x402/cardano";
 import { ExactCardanoScheme } from "@x402/cardano/exact/facilitator";
+import { createPhase1Validator } from "./phase1.js";
+import { withMempoolEvidence } from "./evidence.js";
 
 const PORT = Number(process.env.PORT ?? 4022);
 // `Network` is x402's CAIP-2-shaped id (`namespace:reference`), not a bare string.
@@ -58,11 +60,34 @@ if (!BLOCKFROST_PROJECT_ID) {
 // measuring real canonical depth, and (b) advertise CLIENT submission — in that
 // mode it never broadcasts, it authenticates the transaction the wallet already
 // sent. Without that hook the facilitator would advertise `server` only.
-const signer = toFacilitatorCardanoSigner({
-  network: NETWORK,
-  provider: { blockfrost: { baseUrl: BLOCKFROST_BASE_URL, projectId: BLOCKFROST_PROJECT_ID } },
-  awaitConfirmation: true,
-});
+const provider = { blockfrost: { baseUrl: BLOCKFROST_BASE_URL, projectId: BLOCKFROST_PROJECT_ID } };
+
+// The phase-1 validator needs the same chain queries the signer exposes, but it
+// has to be passed INTO the signer's config — so a query-only signer is built
+// first and lent to it. It broadcasts nothing; only getUtxo/getCurrentSlot are
+// used, and reusing them keeps input decoding identical on both paths.
+const chainQueries = toFacilitatorCardanoSigner({ network: NETWORK, provider });
+
+// The mempool wrapper is what lets `l1Confirmations: -1` mean anything: the
+// stock Blockfrost evidence path reads confirmed transactions only, so an
+// unconfirmed payment is reported as unknown and client mode cannot verify
+// until a block lands. See ./evidence.ts.
+const signer = withMempoolEvidence(
+  toFacilitatorCardanoSigner({
+    network: NETWORK,
+    provider,
+    awaitConfirmation: true,
+    // Without this the facilitator advertises `client` submission only, and
+    // rejects a server-submitted payment rather than broadcasting one it has
+    // not proven the ledger will accept. See ./phase1.ts for what it proves.
+    validatePhase1Transaction: createPhase1Validator({
+      getUtxo: (ref, network) => chainQueries.getUtxo(ref, network),
+      getCurrentSlot: network => chainQueries.getCurrentSlot(network),
+      blockfrost: provider.blockfrost,
+    }),
+  }),
+  provider.blockfrost,
+);
 
 // One scheme on one network. Registering another (e.g. cardano:mainnet, or a
 // different scheme) is a second .register() call — the HTTP surface below is
@@ -72,6 +97,10 @@ const facilitator = new x402Facilitator().register(
   new ExactCardanoScheme(signer, {
     acceptMempool: ACCEPT_MEMPOOL,
     confirmationTimeoutMs: CONFIRMATION_TIMEOUT_MS,
+    // Demo scale: one disposable process, so the volatile store is the
+    // documented fit. Production passes a durable `settlementStore` shared by
+    // every worker — replay state has to survive restarts.
+    inMemorySettlementStoreMaxEntries: 4096,
   }),
 );
 
@@ -151,8 +180,19 @@ app.get("/supported", (_req, res) => {
   res.json(facilitator.getSupported());
 });
 
+/**
+ * Not part of x402. `confirmationTimeoutMs` is published so a resource server
+ * can size its own HTTP timeout above this facilitator's settle budget —
+ * a client that gives up first turns a settling payment into an indeterminate
+ * failure, which is the worst outcome available.
+ */
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", network: NETWORK });
+  res.json({
+    status: "ok",
+    network: NETWORK,
+    confirmationTimeoutMs: CONFIRMATION_TIMEOUT_MS,
+    acceptMempool: ACCEPT_MEMPOOL,
+  });
 });
 
 app.listen(PORT, () => {

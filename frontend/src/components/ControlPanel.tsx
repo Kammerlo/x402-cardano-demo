@@ -2,7 +2,11 @@ import type { WalletInfo } from "../lib/cip30";
 import type { PaymentMethod } from "../x402/flow";
 import { WalletPicker, type WalletConnection } from "./WalletPicker";
 import { MethodPicker } from "./MethodPicker";
-import { SettlementOptions, type DemoSettlement } from "./SettlementOptions";
+import {
+  SettlementOptions,
+  type DemoSettlement,
+  type FacilitatorOptions,
+} from "./SettlementOptions";
 
 export type RunState = "idle" | "running" | "done" | "error";
 
@@ -19,6 +23,8 @@ interface ControlPanelProps {
   onReset: () => void;
   settlement: DemoSettlement;
   onSettlementChange: (next: DemoSettlement) => void;
+  /** What the server's facilitator advertised; null until it answers. */
+  facilitatorOptions: FacilitatorOptions | null;
   settlementSyncing?: boolean;
   settlementError?: string | null;
 }
@@ -38,6 +44,7 @@ export function ControlPanel({
   onReset,
   settlement,
   onSettlementChange,
+  facilitatorOptions,
   settlementSyncing,
   settlementError,
 }: ControlPanelProps) {
@@ -72,6 +79,7 @@ export function ControlPanel({
           value={settlement}
           onChange={onSettlementChange}
           disabled={runState === "running"}
+          facilitator={facilitatorOptions}
           syncing={settlementSyncing}
           syncError={settlementError}
         />

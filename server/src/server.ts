@@ -115,10 +115,184 @@ interface DemoConfig {
   l1Confirmations: number;
 }
 
+/**
+ * The subset of the spec's settlement matrix THIS facilitator can settle.
+ *
+ * The two policies are protocol-wide — the spec allows `server`, `client` and
+ * `either`, and a confirmation range of −1..20 — but any one facilitator
+ * advertises only the part of that it implements, and a facilitator's
+ * capabilities change with its configuration: server submission needs a
+ * phase-1 ledger validator on the signer, and `-1` needs the operator to have
+ * opted into mempool evidence. `@x402/cardano` refuses to serve a 402 outside
+ * what was advertised, so the demo reads `/supported` and offers only what is
+ * there rather than discovering the mismatch at request time.
+ */
+interface FacilitatorOptions {
+  /** Policies that are servable, in spec-default-first order. */
+  submissionPolicies: CardanoSubmissionPolicy[];
+  /** Confirmation range per policy; `either` is the intersection of both modes. */
+  l1Confirmations: Record<string, { minimum: number; maximum: number }>;
+}
+
+/**
+ * Reads the facilitator's advertised Cardano capabilities.
+ *
+ * @returns The settlement options this facilitator can actually honour.
+ */
+async function fetchFacilitatorOptions(): Promise<FacilitatorOptions> {
+  const res = await fetch(`${FACILITATOR_URL}/supported`);
+  if (!res.ok) throw new Error(`facilitator GET /supported returned HTTP ${res.status}`);
+  const body = (await res.json()) as {
+    kinds?: Array<{ scheme?: string; network?: string; extra?: Record<string, unknown> }>;
+  };
+  const kind = body.kinds?.find((k) => k.scheme === "exact" && k.network === "cardano:preprod");
+  if (!kind) throw new Error("facilitator does not advertise `exact` on `cardano:preprod`");
+
+  const full = { minimum: -1, maximum: 20 };
+  // A facilitator that publishes no `extra` has told us nothing, so there is
+  // nothing to narrow — the same all-or-nothing reading the library applies.
+  if (!kind.extra) {
+    return {
+      submissionPolicies: ["server", "client", "either"],
+      l1Confirmations: { server: full, client: full, either: full },
+    };
+  }
+
+  const modes = Array.isArray(kind.extra.submissionModes)
+    ? (kind.extra.submissionModes as unknown[]).map(String)
+    : [];
+  const advertised = (kind.extra.l1Confirmations ?? {}) as Record<string, unknown>;
+  const rangeFor = (mode: string): { minimum: number; maximum: number } | null => {
+    if (!modes.includes(mode)) return null;
+    const range = advertised[mode] as { minimum?: unknown; maximum?: unknown } | undefined;
+    return Number.isInteger(range?.minimum) && Number.isInteger(range?.maximum)
+      ? { minimum: range!.minimum as number, maximum: range!.maximum as number }
+      : null;
+  };
+
+  const server = rangeFor("server");
+  const client = rangeFor("client");
+  const options: FacilitatorOptions = { submissionPolicies: [], l1Confirmations: {} };
+  if (server) {
+    options.submissionPolicies.push("server");
+    options.l1Confirmations.server = server;
+  }
+  if (client) {
+    options.submissionPolicies.push("client");
+    options.l1Confirmations.client = client;
+  }
+  // `either` lets the client pick, so the 402 must be settleable BOTH ways —
+  // its range is the intersection, and it drops out entirely if that is empty.
+  if (server && client) {
+    const either = {
+      minimum: Math.max(server.minimum, client.minimum),
+      maximum: Math.min(server.maximum, client.maximum),
+    };
+    if (either.minimum <= either.maximum) {
+      options.submissionPolicies.push("either");
+      options.l1Confirmations.either = either;
+    }
+  }
+  if (options.submissionPolicies.length === 0) {
+    throw new Error("facilitator advertises no usable submission mode");
+  }
+  return options;
+}
+
+const facilitatorOptions = await fetchFacilitatorOptions();
+
+/**
+ * How long to let a facilitator call run before giving up.
+ *
+ * `HTTPFacilitatorClient` defaults to 30s, which is shorter than a single
+ * Cardano settlement: `/settle` blocks until the payment reaches the 402's
+ * confirmation depth, and one confirmation alone is ~40s on preprod. The
+ * default therefore fails a payment that is settling perfectly well — and the
+ * failure is *indeterminate*, because the facilitator may complete the
+ * settlement moments after the client stops listening. The buyer is then told
+ * the payment failed when it did not.
+ *
+ * So the budget is derived from the facilitator's own settle budget, which the
+ * demo facilitator publishes on `/health`, plus a margin for the round-trip.
+ * A facilitator that does not publish one gets a conservative default.
+ *
+ * @returns The timeout to apply to every facilitator request.
+ */
+async function facilitatorTimeoutMs(): Promise<number> {
+  const override = Number(process.env.FACILITATOR_TIMEOUT_MS);
+  if (Number.isSafeInteger(override) && override > 0) return override;
+  const margin = 30_000;
+  const fallback = 10 * 60_000;
+  try {
+    const res = await fetch(`${FACILITATOR_URL}/health`);
+    if (!res.ok) return fallback;
+    const health = (await res.json()) as { confirmationTimeoutMs?: unknown };
+    return Number.isSafeInteger(health.confirmationTimeoutMs) &&
+      (health.confirmationTimeoutMs as number) > 0
+      ? (health.confirmationTimeoutMs as number) + margin
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const FACILITATOR_TIMEOUT_MS = await facilitatorTimeoutMs();
+
+/**
+ * Why a settlement combination cannot be served, or null when it can.
+ *
+ * @param submissionPolicy - The policy the 402 would advertise.
+ * @param l1Confirmations - The confirmation threshold it would demand.
+ * @returns A reason to show the caller, or null when the pair is servable.
+ */
+function optionFault(
+  submissionPolicy: CardanoSubmissionPolicy,
+  l1Confirmations: number,
+): string | null {
+  if (!facilitatorOptions.submissionPolicies.includes(submissionPolicy)) {
+    return `the facilitator cannot settle \`${submissionPolicy}\` submission (it offers ${facilitatorOptions.submissionPolicies.join(", ")})`;
+  }
+  const { minimum, maximum } = facilitatorOptions.l1Confirmations[submissionPolicy];
+  if (l1Confirmations < minimum || l1Confirmations > maximum) {
+    return `the facilitator accepts l1Confirmations ${minimum}..${maximum} for \`${submissionPolicy}\` submission, not ${l1Confirmations}`;
+  }
+  return null;
+}
+
+// Defaults come from the facilitator, not from a constant: a facilitator
+// without a phase-1 validator advertises `client` only, and hard-coding a
+// policy produces a demo that 500s on its first request.
+//
+// `either` is preferred over the spec default of `server` because it is the one
+// policy that hands the choice to the payer, which is what the frontend's
+// submission-mode picker is for. Falling back in this order keeps the widest
+// still-servable option selected.
+const POLICY_PREFERENCE: CardanoSubmissionPolicy[] = ["either", "server", "client"];
+const defaultPolicy: CardanoSubmissionPolicy =
+  (process.env.SUBMISSION_POLICY as CardanoSubmissionPolicy | undefined) ??
+  POLICY_PREFERENCE.find(policy => facilitatorOptions.submissionPolicies.includes(policy)) ??
+  facilitatorOptions.submissionPolicies[0];
+const defaultRange = facilitatorOptions.l1Confirmations[defaultPolicy];
 const demoConfig: DemoConfig = {
-  submissionPolicy: (process.env.SUBMISSION_POLICY as CardanoSubmissionPolicy) ?? "either",
-  l1Confirmations: Number(process.env.L1_CONFIRMATIONS ?? 1),
+  submissionPolicy: defaultPolicy,
+  // An explicit L1_CONFIRMATIONS is honoured as given (and rejected below if it
+  // cannot be served); the spec default of 1 is clamped instead, so a
+  // facilitator with a narrower range still starts.
+  l1Confirmations:
+    process.env.L1_CONFIRMATIONS !== undefined
+      ? Number(process.env.L1_CONFIRMATIONS)
+      : defaultRange
+        ? Math.min(Math.max(1, defaultRange.minimum), defaultRange.maximum)
+        : 1,
 };
+
+const configuredFault = optionFault(demoConfig.submissionPolicy, demoConfig.l1Confirmations);
+if (configuredFault) {
+  throw new Error(
+    `SUBMISSION_POLICY=${demoConfig.submissionPolicy} L1_CONFIRMATIONS=${demoConfig.l1Confirmations} ` +
+      `cannot be served: ${configuredFault}.`,
+  );
+}
 
 /**
  * The shared policy block every route advertises. Both fields live at the top
@@ -213,9 +387,12 @@ async function masumiRequirementsFor(
       },
     ],
     payByTime: String(payByTime),
-    submitResultTime: String(payByTime + 5 * 60_000),
-    unlockTime: String(payByTime + 20 * 60_000),
-    externalDisputeUnlockTime: String(payByTime + 35 * 60_000),
+    // Each deadline clears its minimum with margin. `submitResultTime` is also
+    // checked against the issuer's own clock at issuance, so landing exactly on
+    // the 15-minute floor fails on the milliseconds spent issuing.
+    submitResultTime: String(payByTime + 10 * 60_000),
+    unlockTime: String(payByTime + 30 * 60_000),
+    externalDisputeUnlockTime: String(payByTime + 50 * 60_000),
     // L1 only — this demo drives no Hydra head, and the facilitator refuses a
     // Hydra payment it cannot authenticate against a verified head.
     settlementPolicy: "l1",
@@ -249,10 +426,21 @@ app.use(
 // reason code is invisible. See ./facilitatorLogging.ts.
 const resourceServer = new x402ResourceServer(
   new LoggingFacilitatorClient(
-    new HTTPFacilitatorClient({ url: FACILITATOR_URL }),
+    new HTTPFacilitatorClient({ url: FACILITATOR_URL, timeoutMs: FACILITATOR_TIMEOUT_MS }),
     FACILITATOR_URL,
   ),
-).register("cardano:preprod", new ExactCardanoScheme());
+).register(
+  "cardano:preprod",
+  new ExactCardanoScheme({
+    // Demo scale, as above: volatile replay state, durable store in production.
+    inMemoryStore: {},
+    // The replay challenge is waived only for an authenticated requester, and
+    // this demo has no auth — so it returns one constant identity for the
+    // single local user. A real deployment MUST derive this from an
+    // upstream-authenticated principal; header values alone prove nothing.
+    requestBinding: () => "demo-single-local-user",
+  }),
+);
 
 // Request-level tracing so a client-visible `402 {}` is explainable from the
 // server log alone: this prints whether the request even carried a payment,
@@ -368,23 +556,37 @@ app.get("/demo/config", (_req, res) => {
     ...demoConfig,
     escrowAddress: MASUMI_ESCROW_ADDRESS,
     sellerAddress: MASUMI_SELLER.sellerAddress,
+    // What the UI is allowed to offer. Sent rather than assumed so the controls
+    // show the facilitator's real limits instead of the spec's full matrix.
+    facilitator: facilitatorOptions,
   });
 });
 
 app.post("/demo/config", express.json(), (req, res) => {
   const { submissionPolicy, l1Confirmations } = (req.body ?? {}) as Partial<DemoConfig>;
-  if (submissionPolicy !== undefined) {
-    if (!["server", "client", "either"].includes(submissionPolicy)) {
-      return res.status(400).json({ error: "submissionPolicy must be server, client or either" });
-    }
-    demoConfig.submissionPolicy = submissionPolicy;
+  if (submissionPolicy !== undefined && !["server", "client", "either"].includes(submissionPolicy)) {
+    return res.status(400).json({ error: "submissionPolicy must be server, client or either" });
   }
-  if (l1Confirmations !== undefined) {
-    if (!Number.isInteger(l1Confirmations) || l1Confirmations < -1 || l1Confirmations > 20) {
-      return res.status(400).json({ error: "l1Confirmations must be an integer from -1 to 20" });
-    }
-    demoConfig.l1Confirmations = l1Confirmations;
+  if (
+    l1Confirmations !== undefined &&
+    (!Number.isInteger(l1Confirmations) || l1Confirmations < -1 || l1Confirmations > 20)
+  ) {
+    return res.status(400).json({ error: "l1Confirmations must be an integer from -1 to 20" });
   }
+  // Both fields are checked together against the facilitator, and only applied
+  // once the pair passes: a partial update could otherwise leave the server
+  // advertising a combination it cannot settle, which fails as a 500 on the
+  // NEXT request rather than as a 400 on this one.
+  const next: DemoConfig = {
+    submissionPolicy: submissionPolicy ?? demoConfig.submissionPolicy,
+    l1Confirmations: l1Confirmations ?? demoConfig.l1Confirmations,
+  };
+  const fault = optionFault(next.submissionPolicy, next.l1Confirmations);
+  if (fault) {
+    return res.status(400).json({ error: `Cannot serve that combination: ${fault}.`, facilitator: facilitatorOptions });
+  }
+  demoConfig.submissionPolicy = next.submissionPolicy;
+  demoConfig.l1Confirmations = next.l1Confirmations;
   // The advertised requirements just changed, so the memoized middleware and
   // the issued Masumi objects must be rebuilt on the next request.
   cachedMiddleware = null;
@@ -487,4 +689,31 @@ if (unserved.length > 0) {
   );
 }
 
-app.listen(PORT, () => console.log(`Resource server listening on :${PORT} (facilitator: ${FACILITATOR_URL})`));
+// Issuance failures (a capability mismatch, a Masumi signing fault) surface as
+// thrown errors inside the middleware. Express's default handler renders those
+// as an HTML stack trace, which is both a leak and unreadable to a fetch()
+// caller — answer JSON instead.
+app.use(
+  (
+    err: unknown,
+    _req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction,
+  ) => {
+    console.error("[server] request failed:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  },
+);
+
+app.listen(PORT, () => {
+  console.log(`Resource server listening on :${PORT} (facilitator: ${FACILITATOR_URL})`);
+  console.log(
+    `  facilitator offers: ${facilitatorOptions.submissionPolicies
+      .map((p) => `${p} (${facilitatorOptions.l1Confirmations[p].minimum}..${facilitatorOptions.l1Confirmations[p].maximum})`)
+      .join(", ")}`,
+  );
+  console.log(
+    `  serving: submissionPolicy=${demoConfig.submissionPolicy} l1Confirmations=${demoConfig.l1Confirmations}`,
+  );
+  console.log(`  facilitator call timeout: ${Math.round(FACILITATOR_TIMEOUT_MS / 1000)}s`);
+});

@@ -83,17 +83,71 @@ export async function runPaymentFlow(
     resource: paymentRequired.resource,
     accepted,
     payload: result.payload,
+    // Echoes the server's `cardanoReplayProtection` challenge. The server binds
+    // it to this request and these requirements, and rejects a paid retry that
+    // drops it.
+    extensions: paymentRequired.extensions,
   };
   onStep({ id: "pay", title: "Retrying with PAYMENT-SIGNATURE (facilitator verifies, then settles on-chain)", detail: paymentPayload });
-  const paid = await fetch(url, {
-    headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(paymentPayload) },
-  });
+  const header = encodePaymentSignatureHeader(paymentPayload);
+  const clientSubmitted =
+    (result.payload as { submissionMode?: string }).submissionMode === "client";
+  const paid = await payWithRetry(url, header, clientSubmitted);
   if (paid.status !== 200) {
     throw new Error(`Payment failed: HTTP ${paid.status} — ${await paid.text()}`);
   }
 
   // 4. Read the settlement receipt + the paid-for resource.
+  // (see payWithRetry below for why step 3 may take several attempts)
   const responseHeader = paid.headers.get("PAYMENT-RESPONSE");
   const settle = responseHeader ? decodePaymentResponseHeader(responseHeader) : null;
   onStep({ id: "settled", title: "Paid! Settlement receipt + resource", detail: { settle, body: await paid.json() } });
+}
+
+/** How long a client-submitted payment keeps retrying before giving up. */
+const CLIENT_SUBMIT_RETRY_MS = 90_000;
+/** Gap between retries — roughly propagation time, well under a block. */
+const CLIENT_SUBMIT_RETRY_INTERVAL_MS = 2_000;
+
+/**
+ * Sends the paid request, retrying while the facilitator cannot yet see a
+ * client-submitted transaction.
+ *
+ * The client does NOT check the chain itself. It broadcast the transaction
+ * through its wallet and handed the server the signed bytes; deciding whether
+ * that transaction is really on the network is the facilitator's job, and it
+ * holds the provider credentials to answer it. All the client knows is that a
+ * 402 came back and it has a payment outstanding, so it asks again.
+ *
+ * Why the retry lives here rather than in the facilitator: `/verify` performs a
+ * single evidence lookup and never polls, because it cannot distinguish "sent a
+ * moment ago, still propagating" from "never sent" — polling on every claim
+ * would let a fabricated payment hold a facilitator request open for minutes.
+ * The party that knows a transaction was broadcast is the one that broadcast
+ * it, so the waiting belongs on this side. Confirmation *depth* is a different
+ * question and the facilitator does wait for that, during `/settle`.
+ *
+ * Retrying is safe: a failed verification releases the server's claim on the
+ * request and the fresh 402 reuses the same replay challenge while it is valid,
+ * so the identical payment can be presented again.
+ *
+ * @param url - The resource URL.
+ * @param header - The encoded PAYMENT-SIGNATURE value.
+ * @param clientSubmitted - Whether the wallet already broadcast the payment.
+ * @returns The first non-402 response, or the last 402 once time runs out.
+ */
+async function payWithRetry(
+  url: string,
+  header: string,
+  clientSubmitted: boolean,
+): Promise<Response> {
+  const deadline = Date.now() + CLIENT_SUBMIT_RETRY_MS;
+  for (;;) {
+    const response = await fetch(url, { headers: { "PAYMENT-SIGNATURE": header } });
+    // Only a client-submitted payment has a reason to succeed later: the
+    // facilitator is waiting to see a transaction that is already on its way.
+    // In server mode a 402 is a verdict, so retrying would only repeat it.
+    if (response.status !== 402 || !clientSubmitted || Date.now() > deadline) return response;
+    await new Promise(resolve => setTimeout(resolve, CLIENT_SUBMIT_RETRY_INTERVAL_MS));
+  }
 }

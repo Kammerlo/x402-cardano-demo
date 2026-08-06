@@ -3,8 +3,10 @@
  *
  * The x402 "exact" scheme on Cardano is CLIENT-DRIVEN: this code builds the
  * complete payment transaction in the browser (Evolution SDK + Blockfrost for
- * UTxOs/protocol parameters), the wallet only signs it. The facilitator never
- * builds or signs anything — it verifies and broadcasts.
+ * UTxOs/protocol parameters) and the wallet signs it — and, in `client`
+ * submission mode, broadcasts it through CIP-30 `submitTx` rather than through
+ * this page's Blockfrost project. The facilitator never builds or signs
+ * anything.
  *
  * Mirrors the reference signer recipe in @x402/cardano (signer.ts):
  *   nonce  = first wallet UTxO, forced as an input via collectFrom
@@ -56,6 +58,8 @@ function buildOutputAssets(asset: string, amount: bigint): Assets.Assets {
 export interface Cip30WalletApi {
   // Minimal CIP-30 surface we rely on (window.cardano.<wallet>.enable() result).
   getNetworkId(): Promise<number>;
+  /** Broadcasts a signed transaction; takes hex CBOR and returns its hash. */
+  submitTx(tx: string): Promise<string>;
 }
 
 /**
@@ -83,48 +87,6 @@ async function fetchCoinsPerUtxoByte(blockfrost: {
   return BigInt(params.coins_per_utxo_size);
 }
 
-/**
- * Waits until the provider can actually see a transaction.
- *
- * Blockfrost exposes no mempool read, so a just-broadcast transaction is
- * invisible until a block includes it. In CLIENT submission mode the
- * facilitator does not broadcast — it authenticates settlement evidence for the
- * transaction the wallet already sent — so retrying before the chain has seen
- * it is rejected with `..._evidence_mismatch`. Waiting here is what makes the
- * paid retry meaningful; it is the cost of choosing client submission against a
- * provider without mempool visibility.
- *
- * @param txHash     - The canonical transaction id to wait for.
- * @param blockfrost - Provider connection.
- * @param timeoutMs  - How long to keep waiting.
- * @returns Nothing; resolves once the transaction is observable.
- */
-async function waitUntilVisible(
-  txHash: string,
-  blockfrost: { baseUrl: string; projectId: string },
-  timeoutMs = 180_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      const res = await fetch(`${blockfrost.baseUrl}/txs/${txHash}`, {
-        headers: { project_id: blockfrost.projectId },
-      });
-      if (res.ok) return;
-    } catch {
-      // Transient provider error — keep waiting until the deadline.
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `Your wallet broadcast ${txHash}, but the chain has not shown it within ` +
-          `${Math.round(timeoutMs / 1000)}s. In client-submission mode the facilitator ` +
-          "authenticates the transaction rather than sending it, so it cannot proceed until " +
-          "the payment is visible.",
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5_000));
-  }
-}
 
 /** `txHash#index` for a wallet UTxO, matching the x402 nonce format. */
 function utxoRef(u: { transactionId: { hash: Uint8Array }; index: bigint | number }): string {
@@ -240,7 +202,7 @@ export async function createCip30Signer(
         if (!schema.ok) throw new Error(`Masumi requirements are invalid: ${schema.detail}`);
         masumiExtra = schema.extra;
 
-        const authorization = verifyMasumiAuthorization(
+        const authorization = await verifyMasumiAuthorization(
           masumiExtra,
           {
             scheme: "exact",
@@ -370,14 +332,42 @@ export async function createCip30Signer(
       //   report success — that is the protocol working, not a bug.
       const transaction = Buffer.from(Transaction.toCBORBytes(signed)).toString("base64");
       if (input.submissionMode === "client") {
-        await submitBuilder.submit();
         // The canonical transaction id is the hash of the BODY bytes, computed
         // exactly as the facilitator does, so the evidence lookup matches.
         const txBytes = Uint8Array.from(Buffer.from(transaction, "base64"));
         const txHash = TransactionHash.toHex(
           TransactionBody.toHashFromBytes(Transaction.extractBodyBytes(txBytes)),
         );
-        await waitUntilVisible(txHash, blockfrost);
+
+        // Broadcast through the WALLET (CIP-30 `submitTx`), not through this
+        // page's Blockfrost project. In client submission mode the protocol
+        // point is that the *payer* puts the transaction on chain, and the
+        // payer here is the wallet — using the demo's own provider key would
+        // make the page the broadcaster while calling it client submission.
+        // Evolution's submitBuilder.submit() delegates to the provider, which
+        // is why it is not used on this path.
+        //
+        // The exact bytes handed to the facilitator are the bytes submitted:
+        // hex of the same base64 above, so neither side re-serializes.
+        const submitted = await (walletApi as Cip30WalletApi).submitTx(
+          Buffer.from(transaction, "base64").toString("hex"),
+        );
+        // A wallet that re-serialized the transaction would put a DIFFERENT id
+        // on chain, and the facilitator — which hashes the bytes it was given —
+        // would then look for a transaction that does not exist. Say so now
+        // rather than after a three-minute wait for evidence that cannot come.
+        if (typeof submitted === "string" && submitted.toLowerCase() !== txHash.toLowerCase()) {
+          throw new Error(
+            `Your wallet broadcast ${submitted}, but the payment sent to the server hashes to ` +
+              `${txHash}. The wallet re-encoded the transaction, so the facilitator cannot ` +
+              "authenticate it. Try server submission instead.",
+          );
+        }
+        // No chain polling here on purpose. Whether the network has really seen
+        // this transaction is the FACILITATOR's question — it holds the
+        // provider credentials and the confirmation policy. The client simply
+        // presents the payment and retries while the answer is "not yet"; see
+        // payWithRetry() in ./flow.ts.
       }
 
       return {

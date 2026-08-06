@@ -10,10 +10,26 @@ export interface DemoSettlement {
   l1Confirmations: number;
 }
 
+/**
+ * What the server's facilitator advertised it can settle, as reported by
+ * `GET /demo/config`. The spec's matrix is wider than any one facilitator, and
+ * `@x402/cardano` refuses to serve a 402 outside what was advertised — so the
+ * controls offer this rather than the full matrix.
+ */
+export interface FacilitatorOptions {
+  submissionPolicies: SubmissionPolicy[];
+  l1Confirmations: Record<string, { minimum: number; maximum: number }>;
+}
+
+/** The spec's full range, used until the server has reported its own. */
+const FULL_RANGE = { minimum: -1, maximum: 20 };
+
 interface SettlementOptionsProps {
   value: DemoSettlement;
   onChange: (next: DemoSettlement) => void;
   disabled?: boolean;
+  /** Null until `GET /demo/config` answers. */
+  facilitator?: FacilitatorOptions | null;
   /** Set while the server is being told about a change. */
   syncing?: boolean;
   syncError?: string | null;
@@ -47,9 +63,26 @@ export function SettlementOptions({
   value,
   onChange,
   disabled,
+  facilitator,
   syncing,
   syncError,
 }: SettlementOptionsProps) {
+  const supports = (policy: SubmissionPolicy) =>
+    !facilitator || facilitator.submissionPolicies.includes(policy);
+  const range = facilitator?.l1Confirmations[value.submissionPolicy] ?? FULL_RANGE;
+  const unavailable = POLICIES.filter((p) => !supports(p.id));
+
+  // Switching policy can strand the slider outside the new policy's range, so
+  // the threshold moves with it — the server rejects the pair, not each field.
+  function selectPolicy(policy: SubmissionPolicy) {
+    const next = facilitator?.l1Confirmations[policy] ?? FULL_RANGE;
+    onChange({
+      ...value,
+      submissionPolicy: policy,
+      l1Confirmations: Math.min(Math.max(value.l1Confirmations, next.minimum), next.maximum),
+    });
+  }
+
   return (
     <div className="settlement-options">
       <div className="settlement-options__group">
@@ -65,9 +98,13 @@ export function SettlementOptions({
               aria-checked={value.submissionPolicy === option.id}
               className="method-picker__option"
               data-selected={value.submissionPolicy === option.id}
-              onClick={() => onChange({ ...value, submissionPolicy: option.id })}
-              disabled={disabled}
-              title={option.blurb}
+              onClick={() => selectPolicy(option.id)}
+              disabled={disabled || !supports(option.id)}
+              title={
+                supports(option.id)
+                  ? option.blurb
+                  : "This facilitator did not advertise it, so the server cannot issue a 402 for it."
+              }
             >
               <span className="method-picker__option-label">{option.label}</span>
             </button>
@@ -76,6 +113,15 @@ export function SettlementOptions({
         <p className="step-note">
           {POLICIES.find((p) => p.id === value.submissionPolicy)?.blurb}
         </p>
+        {unavailable.length > 0 && (
+          <p className="step-note">
+            {unavailable.map((p) => p.label).join(" and ")}{" "}
+            {unavailable.length === 1 ? "is" : "are"} unavailable: the facilitator advertises{" "}
+            <code>submissionModes</code> this server cannot pair with them. Server submission
+            needs a phase-1 ledger validator on the facilitator's signer, and{" "}
+            <code>either</code> needs both modes at once.
+          </p>
+        )}
       </div>
 
       {value.submissionPolicy === "either" && (
@@ -112,8 +158,8 @@ export function SettlementOptions({
           <input
             id="l1-confirmations"
             type="range"
-            min={-1}
-            max={20}
+            min={range.minimum}
+            max={range.maximum}
             step={1}
             value={value.l1Confirmations}
             disabled={disabled}
@@ -122,6 +168,15 @@ export function SettlementOptions({
           <span className="mono-tag settlement-options__value">{value.l1Confirmations}</span>
         </div>
         <p className="step-note">{describeConfirmations(value.l1Confirmations)}</p>
+        {(range.minimum !== FULL_RANGE.minimum || range.maximum !== FULL_RANGE.maximum) && (
+          <p className="step-note">
+            The spec allows −1..20; this facilitator accepts {range.minimum}..{range.maximum} for{" "}
+            <code>{value.submissionPolicy}</code> submission
+            {range.minimum > -1
+              ? " — mempool-only evidence is refused unless its operator sets ACCEPT_MEMPOOL=true."
+              : "."}
+          </p>
+        )}
       </div>
 
       {syncing && <p className="control-panel__hint control-panel__hint--muted">Updating the server…</p>}

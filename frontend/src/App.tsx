@@ -8,7 +8,7 @@ import type { Actor } from "./lib/actors";
 import type { RailPhase } from "./components/ActorRail";
 import { Hero } from "./components/Hero";
 import { ControlPanel, type RunState } from "./components/ControlPanel";
-import type { DemoSettlement } from "./components/SettlementOptions";
+import type { DemoSettlement, FacilitatorOptions } from "./components/SettlementOptions";
 import type { WalletConnection } from "./components/WalletPicker";
 import { Timeline } from "./components/Timeline";
 import { Footer } from "./components/Footer";
@@ -33,10 +33,16 @@ export default function App() {
   // are `PaymentRequirements.extra` fields), so changing them here PUTs the new
   // value to the demo-config endpoint and the next 402 carries it.
   const [settlement, setSettlement] = useState<DemoSettlement>({
+    // Overwritten by the server's own config below. The server derives its
+    // default from the facilitator's advertised capabilities, so guessing one
+    // here would only be right by luck — `either` just matches the usual answer.
     submissionPolicy: "either",
     preferredMode: "server",
     l1Confirmations: 1,
   });
+  // Null until the server answers; the controls offer the full spec matrix
+  // until then, and narrow to what this facilitator advertised once it does.
+  const [facilitatorOptions, setFacilitatorOptions] = useState<FacilitatorOptions | null>(null);
   const [settlementSyncing, setSettlementSyncing] = useState(false);
   const [settlementError, setSettlementError] = useState<string | null>(null);
 
@@ -47,12 +53,17 @@ export default function App() {
       try {
         const res = await fetch(`${SERVER_URL}/demo/config`);
         if (!res.ok) return;
-        const cfg = (await res.json()) as { submissionPolicy?: string; l1Confirmations?: number };
+        const cfg = (await res.json()) as {
+          submissionPolicy?: string;
+          l1Confirmations?: number;
+          facilitator?: FacilitatorOptions;
+        };
         setSettlement((prev) => ({
           ...prev,
           submissionPolicy: (cfg.submissionPolicy as DemoSettlement["submissionPolicy"]) ?? prev.submissionPolicy,
           l1Confirmations: cfg.l1Confirmations ?? prev.l1Confirmations,
         }));
+        if (cfg.facilitator) setFacilitatorOptions(cfg.facilitator);
       } catch {
         // Server not up yet — the picker still works and syncs on first change.
       }
@@ -60,6 +71,7 @@ export default function App() {
   }, []);
 
   async function handleSettlementChange(next: DemoSettlement) {
+    const previous = settlement;
     setSettlement(next);
     if (runState !== "idle") handleReset();
     // `preferredMode` is purely a client-side choice; only the two policy
@@ -75,9 +87,17 @@ export default function App() {
           l1Confirmations: next.l1Confirmations,
         }),
       });
-      if (!res.ok) setSettlementError(`HTTP ${res.status} — ${await res.text()}`);
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => null)) as { error?: string } | null;
+        setSettlementError(detail?.error ?? `HTTP ${res.status}`);
+        // The 402 still advertises the old pair, so the controls have to as
+        // well — showing a setting the server refused would misdescribe the
+        // next payment.
+        setSettlement(previous);
+      }
     } catch (e) {
       setSettlementError(describeError(e));
+      setSettlement(previous);
     } finally {
       setSettlementSyncing(false);
     }
@@ -173,6 +193,7 @@ export default function App() {
           onReset={handleReset}
           settlement={settlement}
           onSettlementChange={handleSettlementChange}
+          facilitatorOptions={facilitatorOptions}
           settlementSyncing={settlementSyncing}
           settlementError={settlementError}
         />
